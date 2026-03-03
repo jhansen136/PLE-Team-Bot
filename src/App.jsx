@@ -70,7 +70,6 @@ export default function TeamBot() {
     setDebugLog(prev=>[...prev.slice(-19), `${new Date().toLocaleTimeString()} ${msg}`]);
   }
 
-  // Load KB from Supabase on mount
   useEffect(()=>{
     (async()=>{
       try {
@@ -119,16 +118,29 @@ export default function TeamBot() {
   async function handleFileChange(e){const f=e.target.files?.[0];if(!f)return;await attachImage(f);e.target.value="";}
   async function attachImage(file){try{const b=await fileToBase64(file);setPendingImage({base64:b,mediaType:file.type,previewUrl:URL.createObjectURL(file)});}catch(e){}}
   function removePendingImage(){if(pendingImage?.previewUrl)URL.revokeObjectURL(pendingImage.previewUrl);setPendingImage(null);}
-
   function clearChat(){setMessages([{role:"assistant",content:WELCOME}]);log("Chat cleared");}
 
   async function callClaude(system, userContent, maxTokens=400) {
+    const body = {
+      model: "claude-sonnet-4-20250514",
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: "user", content: typeof userContent === "string" ? userContent : JSON.stringify(userContent) }]
+    };
     const res = await fetch(ANTHROPIC_API, {
-      method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,system,messages:[{role:"user",content:userContent}]})
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify(body)
     });
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    if(!res.ok) {
+      const errText = await res.text();
+      throw new Error(`HTTP ${res.status}: ${errText}`);
+    }
     const data = await res.json();
     return data.content?.map(b=>b.text||"").join("").trim()||"";
   }
@@ -161,14 +173,27 @@ Reply only "NO" for questions, greetings, or general conversation with no pendin
       if(isKbUpdate) {
         log("Extracting KB update...");
         const kbSummary=knowledgeRef.current.map(e=>`id:${e.id} | [${e.category||"General"}] Q: ${e.question} | A: ${e.answer.slice(0,80)}...`).join("\n");
+
+        // Find the most relevant existing entry and send its FULL raw answer
+        // so the extractor can pick an oldSnippet guaranteed to exist verbatim
+        const recentConv=updatedDisplay.slice(-4).map(m=>`${m.role}: ${m.content}`).join("\n");
+        const bestMatchEntry = knowledgeRef.current.find(e=>
+          recentConv.toLowerCase().includes(e.question.toLowerCase().slice(0,20)) ||
+          recentConv.toLowerCase().includes((e.category||"").toLowerCase())
+        ) || knowledgeRef.current[0];
+
         const extractAnswer = await callClaude(
           `Extract a KB update from the conversation and output ONLY a raw JSON object — no markdown, no backticks, no explanation, just JSON starting with {.
 
 KB entries (id | category | question | answer preview):
 ${kbSummary}
 
+Most relevant existing entry (FULL raw answer text — use this to find an exact oldSnippet):
+ID: ${bestMatchEntry?.id}
+Answer: ${bestMatchEntry?.answer}
+
 Recent conversation:
-${updatedDisplay.slice(-4).map(m=>`${m.role}: ${m.content}`).join("\n")}
+${recentConv}
 
 Output format — pick one:
 
@@ -176,9 +201,9 @@ For a NEW entry:
 {"type":"add","entry":{"category":"...","question":"...","answer":"..."}}
 
 For an EDIT to one specific value inside an existing entry:
-{"type":"edit","id":"<exact id>","oldSnippet":"<exact short text to find and replace in the existing answer>","newSnippet":"<replacement text>"}
+{"type":"edit","id":"<exact id>","oldSnippet":"<copy exact characters from the Full raw answer above>","newSnippet":"<replacement text>"}
 
-IMPORTANT for edits: Do NOT rewrite the whole answer. Just identify the smallest exact substring that needs to change and what to replace it with. oldSnippet must exist verbatim in the current answer.`,
+CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw answer text above. Do not add or change any formatting, bold markers, or whitespace.`,
           userText, 200
         );
         log("Extractor raw: "+extractAnswer.slice(0,120));
@@ -190,12 +215,13 @@ IMPORTANT for edits: Do NOT rewrite the whole answer. Just identify the smallest
         if(parsed?.type==="edit") {
           const existing=knowledgeRef.current.find(e=>e.id===parsed.id);
           if(existing) {
-            const updatedAnswer=parsed.oldSnippet&&existing.answer.includes(parsed.oldSnippet)
-              ?existing.answer.replace(parsed.oldSnippet,parsed.newSnippet)
-              :existing.answer;
-            if(!existing.answer.includes(parsed.oldSnippet)) log("WARNING: oldSnippet not found");
+            const snippetFound = parsed.oldSnippet && existing.answer.includes(parsed.oldSnippet);
+            if(!snippetFound) log("WARNING: oldSnippet not found: "+parsed.oldSnippet?.slice(0,60));
+            const updatedAnswer = snippetFound
+              ? existing.answer.replace(parsed.oldSnippet, parsed.newSnippet)
+              : existing.answer;
             parsed={type:"edit",id:parsed.id,oldAnswer:parsed.oldSnippet,newSnippet:parsed.newSnippet,entry:{...existing,answer:updatedAnswer}};
-            log("Snippet replace ready");
+            log(snippetFound ? "Snippet replace ready" : "Snippet not found — answer unchanged");
           }
         }
 
@@ -213,8 +239,13 @@ IMPORTANT for edits: Do NOT rewrite the whole answer. Just identify the smallest
       const chatHistory=updatedDisplay.map(m=>({role:m.role,content:m.content}));
       chatHistory[chatHistory.length-1]={role:"user",content:contentBlocks};
       const res=await fetch(ANTHROPIC_API,{
-        method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:`You are a helpful team knowledge assistant. Answer questions using the knowledge base below. Be concise and friendly. Never mention JSON, KB mechanics, or your own update process.\n\nKNOWLEDGE BASE:\n${buildContext(knowledgeRef.current)}`,messages:chatHistory})
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",max_tokens:1000,
+          system:`You are a helpful team knowledge assistant. Answer questions using the knowledge base below. Be concise and friendly. Never mention JSON, KB mechanics, or your own update process.\n\nKNOWLEDGE BASE:\n${buildContext(knowledgeRef.current)}`,
+          messages:chatHistory
+        })
       });
       const data=await res.json();
       const reply=data.content?.map(b=>b.text||"").join("")||"Sorry, couldn't get a response.";
@@ -226,7 +257,7 @@ IMPORTANT for edits: Do NOT rewrite the whole answer. Just identify the smallest
     setLoading(false);
   }
 
-  async function confirmKbUpdate(msgIndex,pending) {
+  async function confirmKbUpdate(msgIndex, pending) {
     log("Confirming KB update type="+pending.type);
     const today=new Date().toISOString().slice(0,10);
     const kb=knowledgeRef.current;
@@ -237,8 +268,9 @@ IMPORTANT for edits: Do NOT rewrite the whole answer. Just identify the smallest
         await saveEntryToSupabase(entry);
         updatedKb=[...kb,entry];
       } else if(pending.type==="edit") {
-        await saveEntryToSupabase({...pending.entry,date:today});
-        updatedKb=kb.map(e=>e.id===pending.id?{...pending.entry,date:today}:e);
+        const updated={...pending.entry,date:today};
+        await saveEntryToSupabase(updated);
+        updatedKb=kb.map(e=>e.id===pending.id?updated:e);
       }
       await persistKnowledge(updatedKb);
       const newMsgs=messages.map((m,i)=>i===msgIndex?{...m,pending:null,confirmed:true}:m);
@@ -282,8 +314,9 @@ IMPORTANT for edits: Do NOT rewrite the whole answer. Just identify the smallest
   async function saveEdit(id) {
     try {
       const entry=knowledge.find(e=>e.id===id);
-      await saveEntryToSupabase({...entry,...editEntry});
-      await persistKnowledge(knowledge.map(e=>e.id===id?{...e,...editEntry}:e));
+      const updated={...entry,...editEntry};
+      await saveEntryToSupabase(updated);
+      await persistKnowledge(knowledge.map(e=>e.id===id?updated:e));
       setEditId(null);
       setSaveMsg("Entry updated!");
       setTimeout(()=>setSaveMsg(""),2500);
