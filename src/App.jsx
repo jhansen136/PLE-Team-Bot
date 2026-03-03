@@ -62,12 +62,30 @@ export default function TeamBot() {
   const [showDebug, setShowDebug] = useState(false);
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const textareaRef = useRef(null);
   const knowledgeRef = useRef(knowledge);
   useEffect(()=>{knowledgeRef.current=knowledge;},[knowledge]);
 
   function log(msg) {
     console.log("[TeamBot]", msg);
     setDebugLog(prev=>[...prev.slice(-19), `${new Date().toLocaleTimeString()} ${msg}`]);
+  }
+
+  function autoResize() {
+    const el = textareaRef.current;
+    if(!el) return;
+    el.style.height = "auto";
+    const lineHeight = 22;
+    const maxHeight = lineHeight * 18 + 22;
+    el.style.height = Math.min(el.scrollHeight, maxHeight) + "px";
+    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+  }
+
+  function resetTextarea() {
+    if(textareaRef.current) {
+      textareaRef.current.style.height = "44px";
+      textareaRef.current.style.overflowY = "hidden";
+    }
   }
 
   useEffect(()=>{
@@ -84,19 +102,12 @@ export default function TeamBot() {
 
   useEffect(()=>{chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[messages,loading]);
 
-  async function persistKnowledge(kb) {
-    setKnowledge(kb);
-    knowledgeRef.current=kb;
-  }
+  async function persistKnowledge(kb) { setKnowledge(kb); knowledgeRef.current=kb; }
 
   async function saveEntryToSupabase(entry) {
     const {error} = await supabase.from("knowledge_base").upsert({
-      id: entry.id,
-      category: entry.category,
-      question: entry.question,
-      answer: entry.answer,
-      added_by: entry.addedBy,
-      date: entry.date
+      id: entry.id, category: entry.category, question: entry.question,
+      answer: entry.answer, added_by: entry.addedBy, date: entry.date
     });
     if(error) throw error;
   }
@@ -121,27 +132,13 @@ export default function TeamBot() {
   function clearChat(){setMessages([{role:"assistant",content:WELCOME}]);log("Chat cleared");}
 
   async function callClaude(system, userContent, maxTokens=400) {
-    const body = {
-      model: "claude-sonnet-4-20250514",
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: "user", content: typeof userContent === "string" ? userContent : JSON.stringify(userContent) }]
-    };
     const res = await fetch(ANTHROPIC_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_KEY,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
-      body: JSON.stringify(body)
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,system,messages:[{role:"user",content:typeof userContent==="string"?userContent:JSON.stringify(userContent)}]})
     });
-    if(!res.ok) {
-      const errText = await res.text();
-      throw new Error(`HTTP ${res.status}: ${errText}`);
-    }
-    const data = await res.json();
+    if(!res.ok){const t=await res.text();throw new Error(`HTTP ${res.status}: ${t}`);}
+    const data=await res.json();
     return data.content?.map(b=>b.text||"").join("").trim()||"";
   }
 
@@ -155,11 +152,10 @@ export default function TeamBot() {
     const displayMsg={role:"user",content:userText,imagePreview:pendingImage?.previewUrl??null};
     const updatedDisplay=[...messages,displayMsg];
     setMessages(updatedDisplay);
-    setInput(""); removePendingImage(); setLoading(true);
+    setInput(""); removePendingImage(); setLoading(true); resetTextarea();
 
     try {
       const recentContext=updatedDisplay.slice(-4).map(m=>`${m.role}: ${m.content}`).join("\n");
-
       log("Classifying: "+userText.slice(0,60));
       const classifyAnswer = await callClaude(
         `You decide if the conversation is heading toward ADDING or UPDATING information in a team knowledge base.
@@ -168,19 +164,16 @@ Reply only "NO" for questions, greetings, or general conversation with no pendin
         recentContext, 10
       );
       log("Classifier result: "+classifyAnswer);
-      const isKbUpdate = classifyAnswer.toUpperCase().includes("YES");
+      const isKbUpdate=classifyAnswer.toUpperCase().includes("YES");
 
       if(isKbUpdate) {
         log("Extracting KB update...");
         const kbSummary=knowledgeRef.current.map(e=>`id:${e.id} | [${e.category||"General"}] Q: ${e.question} | A: ${e.answer.slice(0,80)}...`).join("\n");
-
-        // Find the most relevant existing entry and send its FULL raw answer
-        // so the extractor can pick an oldSnippet guaranteed to exist verbatim
         const recentConv=updatedDisplay.slice(-4).map(m=>`${m.role}: ${m.content}`).join("\n");
-        const bestMatchEntry = knowledgeRef.current.find(e=>
-          recentConv.toLowerCase().includes(e.question.toLowerCase().slice(0,20)) ||
+        const bestMatchEntry=knowledgeRef.current.find(e=>
+          recentConv.toLowerCase().includes(e.question.toLowerCase().slice(0,20))||
           recentConv.toLowerCase().includes((e.category||"").toLowerCase())
-        ) || knowledgeRef.current[0];
+        )||knowledgeRef.current[0];
 
         const extractAnswer = await callClaude(
           `Extract a KB update from the conversation and output ONLY a raw JSON object — no markdown, no backticks, no explanation, just JSON starting with {.
@@ -215,13 +208,11 @@ CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw an
         if(parsed?.type==="edit") {
           const existing=knowledgeRef.current.find(e=>e.id===parsed.id);
           if(existing) {
-            const snippetFound = parsed.oldSnippet && existing.answer.includes(parsed.oldSnippet);
+            const snippetFound=parsed.oldSnippet&&existing.answer.includes(parsed.oldSnippet);
             if(!snippetFound) log("WARNING: oldSnippet not found: "+parsed.oldSnippet?.slice(0,60));
-            const updatedAnswer = snippetFound
-              ? existing.answer.replace(parsed.oldSnippet, parsed.newSnippet)
-              : existing.answer;
+            const updatedAnswer=snippetFound?existing.answer.replace(parsed.oldSnippet,parsed.newSnippet):existing.answer;
             parsed={type:"edit",id:parsed.id,oldAnswer:parsed.oldSnippet,newSnippet:parsed.newSnippet,entry:{...existing,answer:updatedAnswer}};
-            log(snippetFound ? "Snippet replace ready" : "Snippet not found — answer unchanged");
+            log(snippetFound?"Snippet replace ready":"Snippet not found — answer unchanged");
           }
         }
 
@@ -241,11 +232,7 @@ CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw an
       const res=await fetch(ANTHROPIC_API,{
         method:"POST",
         headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-        body:JSON.stringify({
-          model:"claude-sonnet-4-20250514",max_tokens:1000,
-          system:`You are a helpful team knowledge assistant. Answer questions using the knowledge base below. Be concise and friendly. Never mention JSON, KB mechanics, or your own update process.\n\nKNOWLEDGE BASE:\n${buildContext(knowledgeRef.current)}`,
-          messages:chatHistory
-        })
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:`You are a helpful team knowledge assistant. Answer questions using the knowledge base below. Be concise and friendly. Never mention JSON, KB mechanics, or your own update process.\n\nKNOWLEDGE BASE:\n${buildContext(knowledgeRef.current)}`,messages:chatHistory})
       });
       const data=await res.json();
       const reply=data.content?.map(b=>b.text||"").join("")||"Sorry, couldn't get a response.";
@@ -257,7 +244,7 @@ CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw an
     setLoading(false);
   }
 
-  async function confirmKbUpdate(msgIndex, pending) {
+  async function confirmKbUpdate(msgIndex,pending) {
     log("Confirming KB update type="+pending.type);
     const today=new Date().toISOString().slice(0,10);
     const kb=knowledgeRef.current;
@@ -300,15 +287,13 @@ CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw an
       setAddingNew(false);
       setSaveMsg("Entry added!");
       setTimeout(()=>setSaveMsg(""),2500);
-    } catch(e) { log("Add error: "+e.message); }
+    } catch(e){log("Add error: "+e.message);}
     setSaving(false);
   }
 
   async function deleteEntry(id) {
-    try {
-      await deleteEntryFromSupabase(id);
-      await persistKnowledge(knowledge.filter(e=>e.id!==id));
-    } catch(e) { log("Delete error: "+e.message); }
+    try{await deleteEntryFromSupabase(id);await persistKnowledge(knowledge.filter(e=>e.id!==id));}
+    catch(e){log("Delete error: "+e.message);}
   }
 
   async function saveEdit(id) {
@@ -320,7 +305,7 @@ CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw an
       setEditId(null);
       setSaveMsg("Entry updated!");
       setTimeout(()=>setSaveMsg(""),2500);
-    } catch(e) { log("Edit error: "+e.message); }
+    } catch(e){log("Edit error: "+e.message);}
   }
 
   function startEdit(e){setEditId(e.id);setEditEntry({...e});}
@@ -344,10 +329,10 @@ CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw an
     previewImg:{width:52,height:52,objectFit:"cover",borderRadius:6},
     previewLabel:{flex:1,fontSize:12,color:"#6ee7b7"},
     removeBtn:{background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.25)",borderRadius:6,padding:"3px 9px",cursor:"pointer",fontSize:12,color:"#fca5a5",fontFamily:"inherit"},
-    inputRow:{display:"flex",gap:9},
-    chatInput:{flex:1,background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:11,padding:"11px 15px",color:"#e2e8f0",fontFamily:"inherit",fontSize:14,outline:"none",resize:"none"},
-    uploadBtn:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:11,padding:"11px 14px",cursor:"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",color:"#94a3b8"},
-    sendBtn:{background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:11,padding:"11px 18px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14,color:"#0d1117",whiteSpace:"nowrap"},
+    inputRow:{display:"flex",gap:9,alignItems:"flex-end"},
+    chatInput:{flex:1,background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:11,padding:"11px 15px",color:"#e2e8f0",fontFamily:"inherit",fontSize:14,outline:"none",resize:"none",lineHeight:"22px",minHeight:"44px",overflowY:"hidden"},
+    uploadBtn:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:11,padding:"11px 14px",cursor:"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",color:"#94a3b8",flexShrink:0},
+    sendBtn:{background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:11,padding:"11px 18px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14,color:"#0d1117",whiteSpace:"nowrap",flexShrink:0},
     hint:{fontSize:11,color:"#374151",marginTop:6,textAlign:"center"},
     debugBox:{background:"#0a0a0a",border:"1px solid #1f2937",borderRadius:8,padding:"10px 12px",marginTop:8,fontSize:11,color:"#4b5563",fontFamily:"monospace",maxHeight:120,overflowY:"auto"},
     kbWrap:{flex:1,overflowY:"auto",padding:"20px 24px",maxWidth:800,width:"100%",margin:"0 auto",boxSizing:"border-box"},
@@ -417,10 +402,18 @@ CRITICAL: oldSnippet must be copied CHARACTER FOR CHARACTER from the Full raw an
             <div style={s.inputRow}>
               <input ref={fileInputRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFileChange}/>
               <button style={s.uploadBtn} onClick={()=>fileInputRef.current?.click()}>📎</button>
-              <textarea style={s.chatInput} rows={1} placeholder="Ask something, or say what to update…" value={input} onChange={e=>setInput(e.target.value)} onPaste={handlePaste} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}/>
+              <textarea
+                ref={textareaRef}
+                style={s.chatInput}
+                placeholder="Ask something, or say what to update…"
+                value={input}
+                onChange={e=>{setInput(e.target.value);autoResize();}}
+                onPaste={handlePaste}
+                onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}
+              />
               <button style={{...s.sendBtn,opacity:loading?0.6:1}} onClick={sendMessage} disabled={loading}>Send →</button>
             </div>
-            <div style={s.hint}>Try: "Update the ECD to May 28" · 📎 upload or paste image</div>
+            <div style={s.hint}>Try: "Update the ECD to May 28" · 📎 upload or paste image · Shift+Enter for new line</div>
           </div>
         </>}
 
