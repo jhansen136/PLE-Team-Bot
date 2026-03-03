@@ -9,7 +9,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const WELCOME = "Hey! I'm your team's knowledge bot 👋 Ask me anything, or tell me something to update — like *\"Update the ECD to May 28\"* — and I'll confirm before saving.";
 
-// Simple SHA-256 hash using Web Crypto API
 async function sha256(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
@@ -49,12 +48,11 @@ function ConfirmCard({pending, onConfirm, onCancel}) {
   );
 }
 
-// Group threads by date
 function groupThreads(threads) {
   const now = new Date();
   const today = new Date(now.getFullYear(),now.getMonth(),now.getDate());
-  const yesterday = new Date(today);yesterday.setDate(yesterday.getDate()-1);
-  const week = new Date(today);week.setDate(week.getDate()-7);
+  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate()-1);
+  const week = new Date(today); week.setDate(week.getDate()-7);
   const groups = {Today:[],Yesterday:[],"Past 7 Days":[],"Older":[]};
   threads.forEach(t=>{
     const d = new Date(t.updated_at);
@@ -106,7 +104,7 @@ export default function App() {
   function log(msg){console.log("[TeamBot]",msg);setDebugLog(prev=>[...prev.slice(-19),`${new Date().toLocaleTimeString()} ${msg}`]);}
 
   function autoResize(){
-    const el=textareaRef.current;if(!el)return;
+    const el=textareaRef.current; if(!el)return;
     el.style.height="auto";
     const max=22*18+22;
     el.style.height=Math.min(el.scrollHeight,max)+"px";
@@ -114,17 +112,16 @@ export default function App() {
   }
   function resetTextarea(){if(textareaRef.current){textareaRef.current.style.height="44px";textareaRef.current.style.overflowY="hidden";}}
 
-  // Login
   async function handleLogin() {
     if(!loginUser.trim()||!loginPass.trim()){setLoginErr("Please enter username and password.");return;}
     setLoggingIn(true);setLoginErr("");
     try {
-      const hash = await sha256(loginPass);
-      const {data,error} = await supabase.from("users").select("*").eq("username",loginUser.trim().toLowerCase()).eq("password_hash",hash).single();
+      const hash=await sha256(loginPass);
+      const {data,error}=await supabase.from("users").select("*").eq("username",loginUser.trim().toLowerCase()).eq("password_hash",hash).single();
       if(error||!data){setLoginErr("Invalid username or password.");setLoggingIn(false);return;}
       setUser(data);
-      localStorage.setItem("teambot_user", JSON.stringify(data));
-    } catch(e){setLoginErr("Login failed: "+e.message);}
+      localStorage.setItem("teambot_user",JSON.stringify(data));
+    }catch(e){setLoginErr("Login failed: "+e.message);}
     setLoggingIn(false);
   }
 
@@ -133,13 +130,11 @@ export default function App() {
     setThreads([]);setMessages([{role:"assistant",content:WELCOME}]);setActiveThreadId(null);
   }
 
-  // Auto-login from localStorage
   useEffect(()=>{
-    const saved = localStorage.getItem("teambot_user");
-    if(saved) try{setUser(JSON.parse(saved));}catch(e){}
+    const saved=localStorage.getItem("teambot_user");
+    if(saved)try{setUser(JSON.parse(saved));}catch(e){}
   },[]);
 
-  // Load KB
   useEffect(()=>{
     (async()=>{
       try {
@@ -151,15 +146,13 @@ export default function App() {
     })();
   },[]);
 
-  // Load threads when user logs in
   useEffect(()=>{
     if(!user)return;
     (async()=>{
       try {
         const {data,error}=await supabase.from("chat_threads").select("*").eq("user_id",user.id).order("updated_at",{ascending:false});
         if(error)throw error;
-        setThreads(data||[]);
-        log("Threads loaded: "+(data?.length||0));
+        setThreads(data||[]);log("Threads loaded: "+(data?.length||0));
       }catch(e){log("Threads load error: "+e.message);}
     })();
   },[user]);
@@ -177,41 +170,37 @@ export default function App() {
     if(error)throw error;
   }
 
-  // Save current thread to Supabase
-  async function saveThread(threadId, msgs, title) {
+  async function saveThread(threadId,msgs,title){
     if(!user||!threadId)return;
     try {
-      await supabase.from("chat_threads").upsert({
-        id:threadId, user_id:user.id, title:title||"New Chat",
-        messages:JSON.stringify(msgs), updated_at:new Date().toISOString()
-      });
+      await supabase.from("chat_threads").upsert({id:threadId,user_id:user.id,title:title||"New Chat",messages:JSON.stringify(msgs),updated_at:new Date().toISOString()});
       const {data}=await supabase.from("chat_threads").select("*").eq("user_id",user.id).order("updated_at",{ascending:false});
       if(data)setThreads(data);
     }catch(e){log("Thread save error: "+e.message);}
   }
 
   function newChat(){
-    const id="thread-"+Date.now();
-    setActiveThreadId(id);
+    setActiveThreadId(null);
+    activeThreadRef.current=null;
     setMessages([{role:"assistant",content:WELCOME}]);
     setInput("");resetTextarea();
-    log("New chat: "+id);
   }
 
   function loadThread(thread){
     setActiveThreadId(thread.id);
+    activeThreadRef.current=thread.id;
     try{setMessages(JSON.parse(thread.messages)||[{role:"assistant",content:WELCOME}]);}
     catch(e){setMessages([{role:"assistant",content:WELCOME}]);}
     setTab("chat");
   }
 
-  async function deleteThread(e, threadId){
+  async function deleteThread(e,threadId){
     e.stopPropagation();
     try {
       await supabase.from("chat_threads").delete().eq("id",threadId);
       setThreads(prev=>prev.filter(t=>t.id!==threadId));
       if(activeThreadRef.current===threadId){
-        setActiveThreadId(null);
+        setActiveThreadId(null);activeThreadRef.current=null;
         setMessages([{role:"assistant",content:WELCOME}]);
       }
     }catch(e){log("Thread delete error: "+e.message);}
@@ -238,9 +227,8 @@ export default function App() {
   }
 
   async function generateTitle(firstUserMsg){
-    try {
-      return await callClaude("Generate a short 4-6 word title for a chat that starts with this message. Reply with only the title, no punctuation.",firstUserMsg,30);
-    }catch(e){return firstUserMsg.slice(0,40);}
+    try{return await callClaude("Generate a short 4-6 word title for a chat that starts with this message. Reply with only the title, no punctuation.",firstUserMsg,30);}
+    catch(e){return firstUserMsg.slice(0,40);}
   }
 
   async function sendMessage(){
@@ -250,7 +238,6 @@ export default function App() {
     if(pendingImage)contentBlocks.push({type:"image",source:{type:"base64",media_type:pendingImage.mediaType,data:pendingImage.base64}});
     contentBlocks.push({type:"text",text:userText});
 
-    // Create thread if none active
     let threadId=activeThreadRef.current;
     if(!threadId){threadId="thread-"+Date.now();setActiveThreadId(threadId);activeThreadRef.current=threadId;}
 
@@ -259,10 +246,9 @@ export default function App() {
     setMessages(updatedDisplay);
     setInput("");removePendingImage();setLoading(true);resetTextarea();
 
-    // Generate title from first user message
     const isFirstMsg=messagesRef.current.length<=1;
     let title=threads.find(t=>t.id===threadId)?.title||"New Chat";
-    if(isFirstMsg){title=await generateTitle(userText);}
+    if(isFirstMsg)title=await generateTitle(userText);
 
     try {
       const recentContext=updatedDisplay.slice(-4).map(m=>`${m.role}: ${m.content}`).join("\n");
@@ -392,7 +378,6 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
 
   const s={
     root:{fontFamily:"'DM Sans','Segoe UI',sans-serif",background:"#0d1117",minHeight:"100vh",display:"flex",flexDirection:"column",color:"#e2e8f0"},
-    // Login
     loginWrap:{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0d1117"},
     loginCard:{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:16,padding:"40px 36px",width:340},
     loginLogo:{display:"flex",alignItems:"center",gap:10,marginBottom:28},
@@ -403,25 +388,23 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     loginInput:{width:"100%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:9,padding:"10px 13px",color:"#e2e8f0",fontFamily:"inherit",fontSize:14,outline:"none",boxSizing:"border-box",marginBottom:14},
     loginBtn:{width:"100%",background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:9,padding:"11px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14,color:"#0d1117"},
     loginErr:{fontSize:12,color:"#fca5a5",marginTop:10,textAlign:"center"},
-    // App layout
     appWrap:{display:"flex",flex:1,overflow:"hidden",height:"100vh"},
-    sidebar:{width:sidebarOpen?260:0,minWidth:sidebarOpen?260:0,background:"#0d1f2d",borderRight:"1px solid rgba(255,255,255,0.07)",display:"flex",flexDirection:"column",overflow:"hidden",transition:"all 0.2s"},
+    sidebar:{width:sidebarOpen?260:0,minWidth:sidebarOpen?260:0,background:"#0d1f2d",borderRight:"1px solid rgba(255,255,255,0.07)",display:"flex",flexDirection:"column",overflow:"hidden",transition:"all 0.2s",height:"100vh",position:"sticky",top:0,flexShrink:0},
     sidebarInner:{width:260,display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"},
-    sidebarTop:{padding:"16px 12px 10px",borderBottom:"1px solid rgba(255,255,255,0.06)"},
+    sidebarTop:{padding:"16px 12px 10px",borderBottom:"1px solid rgba(255,255,255,0.06)",flexShrink:0},
     newChatBtn:{width:"100%",background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:9,padding:"9px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:13,color:"#0d1117",display:"flex",alignItems:"center",justifyContent:"center",gap:6},
-    sidebarThreads:{flex:1,overflowY:"auto",padding:"8px 6px"},
+    sidebarThreads:{flex:1,overflowY:"auto",padding:"8px 6px",minHeight:0},
     threadGroup:{marginBottom:8},
     threadGroupLabel:{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:1,color:"#374151",padding:"6px 8px 4px"},
     threadItem:(active)=>({display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 10px",borderRadius:8,cursor:"pointer",background:active?"rgba(110,231,183,0.08)":"transparent",border:active?"1px solid rgba(110,231,183,0.15)":"1px solid transparent",marginBottom:2,gap:6}),
     threadTitle:{fontSize:13,color:"#cbd5e1",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
     threadDel:{background:"none",border:"none",cursor:"pointer",color:"#374151",fontSize:14,padding:"2px 4px",borderRadius:4,flexShrink:0},
-    sidebarBottom:{padding:"10px 12px",borderTop:"1px solid rgba(255,255,255,0.06)"},
+    sidebarBottom:{padding:"10px 12px",borderTop:"1px solid rgba(255,255,255,0.06)",flexShrink:0},
     userRow:{display:"flex",alignItems:"center",justifyContent:"space-between"},
     userName:{fontSize:13,color:"#6ee7b7",fontWeight:600},
     logoutBtn:{background:"transparent",border:"1px solid rgba(255,255,255,0.08)",borderRadius:7,padding:"4px 10px",cursor:"pointer",fontSize:11,color:"#6b7280",fontFamily:"inherit"},
-    // Main
-    mainCol:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"},
-    header:{background:"linear-gradient(135deg,#0d1f2d 0%,#111827 100%)",borderBottom:"1px solid rgba(110,231,183,0.12)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10},
+    mainCol:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",height:"100vh"},
+    header:{background:"linear-gradient(135deg,#0d1f2d 0%,#111827 100%)",borderBottom:"1px solid rgba(110,231,183,0.12)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexShrink:0},
     headerLeft:{display:"flex",alignItems:"center",gap:10},
     sidebarToggle:{background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.09)",borderRadius:7,padding:"6px 9px",cursor:"pointer",fontSize:14,color:"#6b7280"},
     logoWrap:{display:"flex",alignItems:"center",gap:9},
@@ -430,10 +413,10 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     tabs:{display:"flex",gap:3,background:"rgba(255,255,255,0.05)",borderRadius:10,padding:3},
     tab:(a)=>({padding:"6px 14px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,transition:"all 0.2s",background:a?"linear-gradient(135deg,#6ee7b7,#3b82f6)":"transparent",color:a?"#0d1117":"#94a3b8"}),
     badge:{background:"#6ee7b7",color:"#0d1117",borderRadius:20,padding:"1px 6px",fontSize:11,fontWeight:700,marginLeft:4},
-    main:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"},
+    main:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minHeight:0},
     chatArea:{flex:1,overflowY:"auto",padding:"20px 24px",display:"flex",flexDirection:"column",gap:14,maxWidth:740,width:"100%",margin:"0 auto",boxSizing:"border-box"},
     bubble:(r)=>({maxWidth:"78%",alignSelf:r==="user"?"flex-end":"flex-start",background:r==="user"?"linear-gradient(135deg,#2563eb,#1d4ed8)":"rgba(255,255,255,0.05)",border:r==="user"?"none":"1px solid rgba(255,255,255,0.08)",borderRadius:r==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",padding:"11px 15px",fontSize:14,lineHeight:1.6,color:r==="user"?"#fff":"#e2e8f0"}),
-    inputWrap:{padding:"12px 24px 18px",borderTop:"1px solid rgba(255,255,255,0.07)",maxWidth:740,width:"100%",margin:"0 auto",boxSizing:"border-box"},
+    inputWrap:{padding:"12px 24px 18px",borderTop:"1px solid rgba(255,255,255,0.07)",maxWidth:740,width:"100%",margin:"0 auto",boxSizing:"border-box",flexShrink:0},
     previewWrap:{display:"flex",alignItems:"center",gap:9,marginBottom:8,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(110,231,183,0.2)",borderRadius:9,padding:"7px 10px"},
     previewImg:{width:52,height:52,objectFit:"cover",borderRadius:6},
     previewLabel:{flex:1,fontSize:12,color:"#6ee7b7"},
@@ -471,7 +454,6 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
 
   const iconBtn={background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.09)",borderRadius:8,padding:"7px 11px",cursor:"pointer",fontSize:12,color:"#6b7280",fontFamily:"inherit"};
 
-  // Login screen
   if(!user) return (
     <div style={s.loginWrap}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap'); ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:rgba(110,231,183,0.18);border-radius:3px} input:focus{border-color:rgba(110,231,183,0.35)!important}`}</style>
@@ -490,10 +472,10 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     </div>
   );
 
-  const groupedThreads = groupThreads(threads);
+  const groupedThreads=groupThreads(threads);
 
   return (
-    <div style={{...s.root,flexDirection:"row"}}>
+    <div style={{fontFamily:"'DM Sans','Segoe UI',sans-serif",background:"#0d1117",color:"#e2e8f0",display:"flex",height:"100vh",overflow:"hidden"}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap'); @keyframes bounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}} ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:rgba(110,231,183,0.18);border-radius:3px} input:focus,textarea:focus{border-color:rgba(110,231,183,0.35)!important}`}</style>
 
       {/* Sidebar */}
@@ -525,7 +507,7 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
         </div>
       </div>
 
-      {/* Main content */}
+      {/* Main */}
       <div style={s.mainCol}>
         <header style={s.header}>
           <div style={s.headerLeft}>
@@ -540,9 +522,7 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
               <button style={s.tab(tab==="chat")} onClick={()=>setTab("chat")}>💬 Chat</button>
               <button style={s.tab(tab==="kb")} onClick={()=>setTab("kb")}>📚 Knowledge Base<span style={s.badge}>{knowledge.length}</span></button>
             </div>
-            {tab==="chat"&&<>
-              <button onClick={()=>setShowDebug(v=>!v)} style={iconBtn}>🔍</button>
-            </>}
+            {tab==="chat"&&<button onClick={()=>setShowDebug(v=>!v)} style={iconBtn}>🔍</button>}
           </div>
         </header>
 
