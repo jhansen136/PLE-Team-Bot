@@ -442,7 +442,7 @@ export default function App() {
   }
 
   async function fetchAdoContextForChat(userText){
-    const {pat,org,project,areaPath}=adoSettingsRef.current;
+    const {pat,org,project,areaPath,team}=adoSettingsRef.current;
     if(!pat)return"No Azure DevOps PAT configured — the user should set it up in the Azure tab.";
     const lower=userText.toLowerCase();const lines=[];
     try{
@@ -456,7 +456,7 @@ export default function App() {
         try{const repos=await fetchRepos(pat,org,project);for(const repo of repos.slice(0,3)){const prs=await fetchPRs(pat,org,project,repo.name,"active");if(prs.length){lines.push(`\nACTIVE PRs in ${repo.name}:`);prs.slice(0,10).forEach(pr=>lines.push(`PR #${pr.id}: ${pr.title} | ${pr.sourceBranch}→${pr.targetBranch} | By: ${pr.createdBy} | Reviewers: ${pr.reviewers||"none"}`));}};}catch(e){lines.push("(Could not load PRs: "+e.message+")");}
       }
       if(/sprint|iteration|this week|current sprint/.test(lower)){
-        try{const sprint=await fetchCurrentSprint(pat,org,project,"");if(sprint){lines.push(`\nCURRENT SPRINT: ${sprint.name} (${sprint.attributes?.startDate?.slice(0,10)||"?"} – ${sprint.attributes?.finishDate?.slice(0,10)||"?"})`);const items=await fetchSprintWorkItems(pat,org,project,"",sprint.id);items.forEach(wi=>lines.push(`  #${wi.id} [${wi.state}] ${wi.title} — ${wi.assignedTo}`));}}catch(e){lines.push("(Could not load sprint: "+e.message+")");}
+        try{const sprint=await fetchCurrentSprint(pat,org,project,team);if(sprint){lines.push(`\nCURRENT SPRINT: ${sprint.name} (${sprint.attributes?.startDate?.slice(0,10)||"?"} – ${sprint.attributes?.finishDate?.slice(0,10)||"?"})`);const items=await fetchSprintWorkItems(pat,org,project,team,sprint.id);const areaClause=areaPath?" (filtered to your area)":"";lines.push(`Sprint items${areaClause}:`);items.forEach(wi=>lines.push(`  #${wi.id} [${wi.type}][${wi.state}] ${wi.title} — ${wi.assignedTo}`));}}catch(e){lines.push("(Could not load sprint: "+e.message+")");}
       }
     }catch(e){lines.push("(ADO error: "+e.message+")");}
     return lines.join("\n")||"No relevant Azure DevOps data found.";
