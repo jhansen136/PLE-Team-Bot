@@ -88,30 +88,40 @@ async function fetchRepos(pat, org, project) {
 
 async function fetchCurrentSprint(pat, org, project, team) {
   const base = `https://dev.azure.com/${org}/${project}`;
-  const teamPath = team ? `/${encodeURIComponent(team)}` : "";
-  try {
-    const data = await adoGet(`${base}${teamPath}/_apis/work/teamsettings/iterations?$timeframe=current&api-version=7.1`, pat);
-    return data.value?.[0] || null;
-  } catch(e) {
-    const data = await adoGet(`${base}/_apis/work/teamsettings/iterations?$timeframe=current&api-version=7.1`, pat);
-    return data.value?.[0] || null;
+  const urls = team
+    ? [`${base}/${encodeURIComponent(team)}/_apis/work/teamsettings/iterations?$timeframe=current&api-version=7.1`,
+       `${base}/_apis/work/teamsettings/iterations?$timeframe=current&api-version=7.1`]
+    : [`${base}/_apis/work/teamsettings/iterations?$timeframe=current&api-version=7.1`];
+  for (const url of urls) {
+    try {
+      const data = await adoGet(url, pat);
+      if (data.value?.length) return data.value[0];
+    } catch(e) { /* try next */ }
   }
+  return null;
 }
 
 async function fetchSprintWorkItems(pat, org, project, team, iterationId) {
   const base = `https://dev.azure.com/${org}/${project}`;
-  const teamPath = team ? `/${encodeURIComponent(team)}` : "";
-  try {
-    const data = await adoGet(`${base}${teamPath}/_apis/work/teamsettings/iterations/${iterationId}/workitems?api-version=7.1`, pat);
-    const ids = (data.workItemRelations||[]).map(r=>r.target?.id).filter(Boolean);
-    if (!ids.length) return [];
-    const fields = "System.Id,System.Title,System.State,System.AssignedTo,System.WorkItemType";
-    const details = await adoGet(`${adoBase(org,project)}/wit/workitems?ids=${ids.join(",")}&fields=${fields}&api-version=7.1`, pat);
-    return (details.value||[]).map(wi=>({
-      id: wi.id, title: wi.fields["System.Title"], state: wi.fields["System.State"],
-      type: wi.fields["System.WorkItemType"], assignedTo: wi.fields["System.AssignedTo"]?.displayName||"Unassigned",
-    }));
-  } catch(e) { return []; }
+  const urls = team
+    ? [`${base}/${encodeURIComponent(team)}/_apis/work/teamsettings/iterations/${iterationId}/workitems?api-version=7.1`,
+       `${base}/_apis/work/teamsettings/iterations/${iterationId}/workitems?api-version=7.1`]
+    : [`${base}/_apis/work/teamsettings/iterations/${iterationId}/workitems?api-version=7.1`];
+  for (const url of urls) {
+    try {
+      const data = await adoGet(url, pat);
+      const ids = (data.workItemRelations||[]).map(r=>r.target?.id).filter(Boolean);
+      if (!ids.length) return [];
+      const fields = "System.Id,System.Title,System.State,System.AssignedTo,System.WorkItemType,System.AreaPath";
+      const details = await adoGet(`${adoBase(org,project)}/wit/workitems?ids=${ids.join(",")}&fields=${fields}&api-version=7.1`, pat);
+      return (details.value||[]).map(wi=>({
+        id: wi.id, title: wi.fields["System.Title"], state: wi.fields["System.State"],
+        type: wi.fields["System.WorkItemType"], assignedTo: wi.fields["System.AssignedTo"]?.displayName||"Unassigned",
+        areaPath: wi.fields["System.AreaPath"]||"",
+      }));
+    } catch(e) { /* try next */ }
+  }
+  return [];
 }
 
 // ─── Misc helpers ─────────────────────────────────────────────────────────────
@@ -229,7 +239,7 @@ export default function App() {
   const [creatingWI,setCreatingWI]=useState(null);
   const [wiMsg,setWiMsg]=useState("");
   // Azure DevOps
-  const [adoSettings,setAdoSettings]=useState({pat:"",org:DEFAULT_ADO_ORG,project:DEFAULT_ADO_PROJECT,team:"",repo:""});
+  const [adoSettings,setAdoSettings]=useState({pat:"",org:DEFAULT_ADO_ORG,project:DEFAULT_ADO_PROJECT,team:"",repo:"",areaPath:""});
   const [adoSettingsDraft,setAdoSettingsDraft]=useState(null);
   const [adoConnected,setAdoConnected]=useState(false);
   const [adoSubTab,setAdoSubTab]=useState("workitems");
@@ -298,14 +308,15 @@ export default function App() {
 
   // ── ADO data loaders ──────────────────────────────────────────────────────
   async function loadWorkItems(){
-    const {pat,org,project}=adoSettingsRef.current;if(!pat)return;
+    const {pat,org,project,areaPath}=adoSettingsRef.current;if(!pat)return;
     setAdoWILoading(true);setAdoWIError("");
     try{
+      const areaClause=areaPath?` AND [System.AreaPath] UNDER '${areaPath}'`:"";
       const wiql=adoWIFilter==="mine"
-        ?`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.AssignedTo]=@me AND [System.State]<>'Done' AND [System.State]<>'Closed' ORDER BY [System.ChangedDate] DESC`
+        ?`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}'${areaClause} AND [System.AssignedTo]=@me AND [System.State]<>'Done' AND [System.State]<>'Closed' ORDER BY [System.ChangedDate] DESC`
         :adoWIFilter==="active"
-        ?`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`
-        :`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' ORDER BY [System.ChangedDate] DESC`;
+        ?`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}'${areaClause} AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`
+        :`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}'${areaClause} ORDER BY [System.ChangedDate] DESC`;
       const items=await fetchWorkItems(pat,org,project,wiql);
       setAdoWorkItems(items);log(`ADO: ${items.length} work items`);
     }catch(e){setAdoWIError(e.message);log("ADO WI error: "+e.message);}
@@ -427,12 +438,13 @@ export default function App() {
   }
 
   async function fetchAdoContextForChat(userText){
-    const {pat,org,project}=adoSettingsRef.current;
+    const {pat,org,project,areaPath}=adoSettingsRef.current;
     if(!pat)return"No Azure DevOps PAT configured — the user should set it up in the Azure tab.";
     const lower=userText.toLowerCase();const lines=[];
     try{
       if(/work item|task|bug|ticket|assign|sprint|backlog|story|feature|epic/.test(lower)){
-        const wiql=`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`;
+        const areaClause=areaPath?` AND [System.AreaPath] UNDER '${areaPath}'`:"";
+        const wiql=`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}'${areaClause} AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`;
         const items=await fetchWorkItems(pat,org,project,wiql);
         if(items.length){lines.push("ACTIVE WORK ITEMS:");items.slice(0,25).forEach(wi=>lines.push(`#${wi.id} [${wi.type}] ${wi.title} | State: ${wi.state} | Assigned: ${wi.assignedTo}`));}
       }
@@ -939,7 +951,7 @@ export default function App() {
                       <div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}><WITypeChip type={wi.type}/><span style={{fontSize:11,color:"#374151"}}>#{wi.id}</span></div><div style={s.adoCardTitle}>{wi.title}</div></div>
                       <StateChip state={wi.state}/>
                     </div>
-                    <div style={s.adoCardMeta}><span>👤 {wi.assignedTo}</span><a style={s.adoLink} href={`https://dev.azure.com/${adoSettings.org}/${adoSettings.project}/_workitems/edit/${wi.id}`} target="_blank" rel="noopener">Open ↗</a></div>
+                    <div style={s.adoCardMeta}><span>👤 {wi.assignedTo}</span>{wi.areaPath&&<span style={{fontSize:10,color:"#374151"}}>{wi.areaPath.split("\\").pop()}</span>}<a style={s.adoLink} href={`https://dev.azure.com/${adoSettings.org}/${adoSettings.project}/_workitems/edit/${wi.id}`} target="_blank" rel="noopener">Open ↗</a></div>
                   </div>
                 ))}
               </>}
@@ -960,9 +972,12 @@ export default function App() {
                   <div><label style={s.settingLabel}>Project</label><input style={s.settingInput} placeholder="nps" value={adoSettingsDraft.project} onChange={e=>setAdoSettingsDraft({...adoSettingsDraft,project:e.target.value})}/></div>
                 </div>
                 <div style={s.formRow}>
-                  <div><label style={s.settingLabel}>Team <span style={{fontWeight:400}}>(optional)</span></label><input style={s.settingInput} placeholder="e.g. nps Team" value={adoSettingsDraft.team} onChange={e=>setAdoSettingsDraft({...adoSettingsDraft,team:e.target.value})}/></div>
+                  <div><label style={s.settingLabel}>Team <span style={{fontWeight:400}}>(optional)</span></label><input style={s.settingInput} placeholder="e.g. PL Enhancements" value={adoSettingsDraft.team} onChange={e=>setAdoSettingsDraft({...adoSettingsDraft,team:e.target.value})}/></div>
                   <div><label style={s.settingLabel}>Default Repo <span style={{fontWeight:400}}>(optional)</span></label><input style={s.settingInput} placeholder="e.g. nps" value={adoSettingsDraft.repo} onChange={e=>setAdoSettingsDraft({...adoSettingsDraft,repo:e.target.value})}/></div>
                 </div>
+                <label style={s.settingLabel}>Area Path <span style={{fontWeight:400}}>(optional — scopes work items to your team's board)</span></label>
+                <input style={s.settingInput} placeholder="e.g. nps\PL Enhancements" value={adoSettingsDraft.areaPath||""} onChange={e=>setAdoSettingsDraft({...adoSettingsDraft,areaPath:e.target.value})}/>
+                <div style={{fontSize:11,color:"#4b5563",marginBottom:10,marginTop:-6}}>Find this in Azure DevOps → Project Settings → Teams → your team → Area. Use the exact path shown there.</div>
                 <div style={s.formBtns}>
                   <button style={s.cancelBtn} onClick={()=>setAdoSettingsDraft({...adoSettings})}>Reset</button>
                   <button style={s.addBtn} onClick={()=>{saveAdoSettings(adoSettingsDraft);setAdoSubTab("workitems");}}>Save &amp; Connect</button>
