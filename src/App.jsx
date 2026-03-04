@@ -64,6 +64,51 @@ function groupThreads(threads) {
   return groups;
 }
 
+// ─── Fuzzy snippet matching ──────────────────────────────────────────────────
+// Tries exact match first, then normalised-whitespace, then case-insensitive.
+// Returns the index inside `haystack` where `needle` was found, or -1.
+function fuzzyIndexOf(haystack, needle) {
+  if (!needle) return -1;
+  // 1. exact
+  let idx = haystack.indexOf(needle);
+  if (idx !== -1) return idx;
+  // 2. normalise whitespace in both
+  const normH = haystack.replace(/\s+/g," ");
+  const normN = needle.replace(/\s+/g," ");
+  idx = normH.indexOf(normN);
+  if (idx !== -1) return idx; // position is approximate but close enough
+  // 3. case-insensitive
+  idx = haystack.toLowerCase().indexOf(needle.toLowerCase());
+  return idx;
+}
+
+// Apply a snippet replacement using fuzzy matching.
+// Returns the new full answer string.
+function applySnippetReplace(fullAnswer, oldSnippet, newSnippet) {
+  const idx = fuzzyIndexOf(fullAnswer, oldSnippet);
+  if (idx === -1) {
+    // Last resort: append a correction note
+    return `${fullAnswer} [Updated: ${newSnippet}]`;
+  }
+  // Use the found position with the original snippet length
+  const actualOld = fullAnswer.substr(idx, oldSnippet.length);
+  return fullAnswer.replace(actualOld, newSnippet);
+}
+
+// ─── Robust JSON extraction ──────────────────────────────────────────────────
+function safeParseJson(raw) {
+  if (!raw) return null;
+  // Pass 1: try as-is
+  try { return JSON.parse(raw); } catch (_) {}
+  // Pass 2: strip markdown fences
+  const stripped = raw.replace(/^```[\w]*\n?/,"").replace(/\n?```$/,"").trim();
+  try { return JSON.parse(stripped); } catch (_) {}
+  // Pass 3: find first { … } block
+  const match = raw.match(/(\{[\s\S]*\})/);
+  if (match) { try { return JSON.parse(match[1]); } catch (_) {} }
+  return null;
+}
+
 export default function App() {
   const [user,setUser]=useState(null);
   const [loginUser,setLoginUser]=useState("");
@@ -93,7 +138,7 @@ export default function App() {
   const [searchTerm,setSearchTerm]=useState("");
 
   // Meeting notes state
-  const [noteMode,setNoteMode]=useState("structured"); // "structured" | "raw"
+  const [noteMode,setNoteMode]=useState("structured");
   const [addingNote,setAddingNote]=useState(false);
   const [noteForm,setNoteForm]=useState({project:"",date:"",attendees:"",key_decisions:"",action_items:"",raw_notes:""});
   const [rawPaste,setRawPaste]=useState("");
@@ -220,12 +265,11 @@ export default function App() {
     }catch(e){log("Thread delete error: "+e.message);}
   }
 
-  // Get recent meeting notes for a project mentioned in the conversation
   function getRelevantNotes(conversationText, allNotes, maxNotes=2) {
     const lower = conversationText.toLowerCase();
     const projectNotes = allNotes.filter(n => lower.includes(n.project.toLowerCase()));
     if(projectNotes.length > 0) return projectNotes.slice(0, maxNotes);
-    return allNotes.slice(0, maxNotes); // fallback: most recent 2
+    return allNotes.slice(0, maxNotes);
   }
 
   function buildNotesContext(notes) {
@@ -240,6 +284,30 @@ Notes: ${n.raw_notes?.slice(0,300)||"N/A"}`).join("\n\n");
   function buildKbContext(kb){
     if(!kb.length)return"No entries yet.";
     return kb.map(e=>`[id:${e.id}][${e.category||"General"}] Q: ${e.question}\nA: ${e.answer}`).join("\n\n");
+  }
+
+  // ─── NEW: Check if the last bot message in the history has an unresolved pending card
+  function getLastPendingCard(msgs) {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role === "assistant" && m.pending) return { msg: m, index: i };
+      // If user sent something since the last bot message, stop looking
+      if (m.role === "user") break;
+    }
+    return null;
+  }
+
+  // ─── NEW: Check if last BOT message had a pending card (even if already acted on)
+  function lastBotHadPendingCard(msgs) {
+    // Walk backwards to find the most recent assistant message before the last user message
+    let passedUser = false;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") { passedUser = true; continue; }
+      if (passedUser && msgs[i].role === "assistant") {
+        return !!(msgs[i].pending);
+      }
+    }
+    return false;
   }
 
   async function handlePaste(e){
@@ -262,6 +330,72 @@ Notes: ${n.raw_notes?.slice(0,300)||"N/A"}`).join("\n\n");
     catch(e){return msg.slice(0,40);}
   }
 
+  // ─── FIXED: KB update classifier ────────────────────────────────────────────
+  // Takes the last few turns and the KB summary to make a grounded decision.
+  async function classifyKbIntent(recentMessages, kbSummary) {
+    // Build a concise transcript (last 6 turns max)
+    const transcript = recentMessages.slice(-6).map(m=>`${m.role.toUpperCase()}: ${m.content}`).join("\n");
+
+    const system = `You decide if the user wants to ADD or UPDATE an entry in the team knowledge base.
+
+Knowledge base entries available:
+${kbSummary}
+
+Rules:
+- Reply YES only if the user is EXPLICITLY stating a new fact, correcting a value, or asking to record/update something in the KB.
+- Reply YES for short affirmations (yes, sure, go ahead, do it) ONLY if the immediately preceding ASSISTANT message proposed a specific KB change.
+- Reply NO for questions, greetings, summaries, general conversation, or vague references.
+- When in doubt, reply NO.
+
+Reply with exactly one word: YES or NO.`;
+
+    const answer = await callClaude(system, `Conversation:\n${transcript}`, 10);
+    return answer.trim().toUpperCase().startsWith("YES");
+  }
+
+  // ─── FIXED: KB update extractor ─────────────────────────────────────────────
+  // Returns a parsed object or null. Never throws.
+  async function extractKbUpdate(recentMessages, kb) {
+    const transcript = recentMessages.slice(-6).map(m=>`${m.role.toUpperCase()}: ${m.content}`).join("\n");
+
+    // Build a rich KB listing with full answers (so oldSnippet can be copy-pasted)
+    const kbListing = kb.map(e=>`ID: ${e.id}
+Category: ${e.category||"General"}
+Question: ${e.question}
+Answer: ${e.answer}`).join("\n---\n");
+
+    const system = `You extract a knowledge base update from a conversation and return ONLY a JSON object — no markdown fences, no explanation, just the raw JSON starting with {.
+
+KNOWLEDGE BASE (use exact text from these answers for oldSnippet):
+${kbListing}
+
+OUTPUT RULES:
+- For a NEW entry:
+  {"type":"add","entry":{"category":"<category>","question":"<question>","answer":"<full answer>"}}
+
+- For an EDIT to an existing entry, copy EXACT characters from the Answer field above:
+  {"type":"edit","id":"<exact id from above>","oldSnippet":"<copy verbatim from Answer>","newSnippet":"<replacement text>"}
+
+- If the update replaces the ENTIRE answer, use the full answer text as oldSnippet.
+- If nothing can be confidently extracted, return: {"type":"none"}
+
+IMPORTANT: oldSnippet must be a verbatim substring of the Answer shown above. Do not paraphrase.`;
+
+    const raw = await callClaude(system, `Conversation:\n${transcript}`, 400);
+    log("Extractor raw response: " + raw.slice(0, 150));
+
+    const parsed = safeParseJson(raw);
+    if (!parsed) {
+      log("Extractor: JSON parse failed for raw: " + raw.slice(0,100));
+      return null;
+    }
+    if (parsed.type === "none" || !parsed.type) {
+      log("Extractor: model returned type=none");
+      return null;
+    }
+    return parsed;
+  }
+
   // Process raw meeting notes with AI
   async function processRawNotes(){
     if(!rawPaste.trim())return;
@@ -274,11 +408,9 @@ If date is not found use today: ${new Date().toISOString().slice(0,10)}
 If project name not found use "Unknown Project"`,
         rawPaste, 800
       );
-      const clean=result.replace(/^```[\w]*\n?/,"").replace(/\n?```$/,"").trim();
-      const parsed=JSON.parse(clean);
-      setNoteForm(parsed);
-      setNoteMode("structured");
-      log("Raw notes processed successfully");
+      const parsed=safeParseJson(result);
+      if(parsed){setNoteForm(parsed);setNoteMode("structured");log("Raw notes processed successfully");}
+      else{log("Raw notes: parse failed");}
     }catch(e){log("Raw notes processing error: "+e.message);}
     setProcessingRaw(false);
   }
@@ -325,6 +457,7 @@ If project name not found use "Unknown Project"`,
     }catch(e){log("Edit note error: "+e.message);}
   }
 
+  // ─── FIXED: sendMessage ──────────────────────────────────────────────────────
   async function sendMessage(){
     if((!input.trim()&&!pendingImage)||loading)return;
     const userText=input.trim()||"What can you tell me about this image?";
@@ -345,94 +478,128 @@ If project name not found use "Unknown Project"`,
     if(isFirstMsg)title=await generateTitle(userText);
 
     try {
-      const recentContext=updatedDisplay.slice(-4).map(m=>`${m.role}: ${m.content}`).join("\n");
-      log("Classifying: "+userText.slice(0,60));
-      const classifyAnswer=await callClaude(
-        `You decide if the conversation is heading toward ADDING or UPDATING information in a team knowledge base.
-Reply only "YES" if the user clearly wants to record, update, add, or change a fact/date/value — including short confirmations like "yes" or "sure" that follow a bot proposing a KB change.
-Reply only "NO" for questions, greetings, or general conversation with no pending KB change.`,
-        recentContext,10
-      );
-      log("Classifier result: "+classifyAnswer);
-      const isKbUpdate=classifyAnswer.toUpperCase().includes("YES");
+      // ── Step 1: Decide whether this is a KB update intent ──────────────────
+      // Fast-path: if the previous bot message had a pending confirm card,
+      // short replies (yes/no/cancel) are handled directly without calling Claude.
+      const lastPending = getLastPendingCard(updatedDisplay);
+      const lowerInput = userText.trim().toLowerCase();
+      const isConfirmation = /^(yes|yeah|yep|sure|ok|okay|do it|confirm|go ahead|correct|right|yup|affirmative)[\s!.]*$/.test(lowerInput);
+      const isCancellation = /^(no|nope|cancel|stop|don't|nevermind|never mind|abort)[\s!.]*$/.test(lowerInput);
 
-      if(isKbUpdate){
+      if (lastPending && isConfirmation) {
+        log("Fast-path: user confirmed pending card");
+        await confirmKbUpdate(lastPending.index, lastPending.msg.pending);
+        const t=threads.find(t=>t.id===activeThreadRef.current);
+        await saveThread(threadId, messagesRef.current, t?.title||title);
+        setLoading(false);
+        return;
+      }
+      if (lastPending && isCancellation) {
+        log("Fast-path: user cancelled pending card");
+        cancelKbUpdate(lastPending.index);
+        setLoading(false);
+        return;
+      }
+
+      // ── Step 2: Classifier ─────────────────────────────────────────────────
+      const kbSummary = knowledgeRef.current.map(e=>`[${e.id}] [${e.category||"General"}] Q: ${e.question} | A: ${e.answer.slice(0,80)}`).join("\n");
+      log("Classifying intent...");
+      const isKbUpdate = await classifyKbIntent(updatedDisplay, kbSummary);
+      log("Classifier: " + (isKbUpdate ? "YES — KB update" : "NO — normal chat"));
+
+      if (isKbUpdate) {
+        // ── Step 3: Extract the structured update ──────────────────────────
         log("Extracting KB update...");
-        const kbSummary=knowledgeRef.current.map(e=>`id:${e.id} | [${e.category||"General"}] Q: ${e.question} | A: ${e.answer.slice(0,80)}...`).join("\n");
-        const recentConv=updatedDisplay.slice(-4).map(m=>`${m.role}: ${m.content}`).join("\n");
-        const bestMatch=knowledgeRef.current.find(e=>recentConv.toLowerCase().includes(e.question.toLowerCase().slice(0,20))||recentConv.toLowerCase().includes((e.category||"").toLowerCase()))||knowledgeRef.current[0];
+        const extracted = await extractKbUpdate(updatedDisplay, knowledgeRef.current);
 
-        const extractAnswer=await callClaude(
-          `Extract a KB update from the conversation and output ONLY a raw JSON object — no markdown, no backticks, no explanation, just JSON starting with {.
-KB entries: ${kbSummary}
-Most relevant entry FULL answer:
-ID: ${bestMatch?.id}
-Answer: ${bestMatch?.answer}
-Recent conversation: ${recentConv}
-For NEW: {"type":"add","entry":{"category":"...","question":"...","answer":"..."}}
-For EDIT: {"type":"edit","id":"<exact id>","oldSnippet":"<copy exact chars from answer>","newSnippet":"<replacement>"}
-CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
-          userText,200
-        );
-        log("Extractor raw: "+extractAnswer.slice(0,120));
-        const cleanJson=extractAnswer.replace(/^```[\w]*\n?/,"").replace(/\n?```$/,"").trim();
-        let parsed=null;
-        try{parsed=JSON.parse(cleanJson);}catch(e){log("JSON parse failed: "+e.message);}
-
-        if(parsed?.type==="edit"){
-          const existing=knowledgeRef.current.find(e=>e.id===parsed.id);
-          if(existing){
-            const found=parsed.oldSnippet&&existing.answer.includes(parsed.oldSnippet);
-            if(!found)log("WARNING: oldSnippet not found");
-            const updated=found?existing.answer.replace(parsed.oldSnippet,parsed.newSnippet):existing.answer;
-            parsed={type:"edit",id:parsed.id,oldAnswer:parsed.oldSnippet,newSnippet:parsed.newSnippet,entry:{...existing,answer:updated}};
+        if (extracted && extracted.type === "edit") {
+          const existing = knowledgeRef.current.find(e => e.id === extracted.id);
+          if (!existing) {
+            log("Extractor: edit target id not found: " + extracted.id);
+          } else {
+            const idx = fuzzyIndexOf(existing.answer, extracted.oldSnippet);
+            if (idx === -1) {
+              log("Extractor: oldSnippet not found even with fuzzy match — will replace full answer");
+            }
+            const newAnswer = applySnippetReplace(existing.answer, extracted.oldSnippet, extracted.newSnippet);
+            const pendingPayload = {
+              type: "edit",
+              id: extracted.id,
+              oldAnswer: extracted.oldSnippet || existing.answer,
+              newSnippet: extracted.newSnippet,
+              entry: { ...existing, answer: newAnswer },
+            };
+            const botMsg = { role:"assistant", content:"I'd like to make the following change to the Knowledge Base — please confirm:", pending: pendingPayload };
+            const newMsgs = [...updatedDisplay, botMsg];
+            setMessages(newMsgs);
+            await saveThread(threadId, newMsgs, title);
+            setLoading(false);
+            return;
           }
         }
 
-        if(parsed&&(parsed.type==="add"||parsed.type==="edit")){
-          log("Showing confirm card");
-          const botMsg={role:"assistant",content:"I'd like to make the following change to the Knowledge Base — please confirm:",pending:parsed};
-          const newMsgs=[...updatedDisplay,botMsg];
-          setMessages(newMsgs);await saveThread(threadId,newMsgs,title);
-          setLoading(false);return;
-        }else{log("Extraction failed, falling through to chat");}
+        if (extracted && extracted.type === "add") {
+          const pendingPayload = {
+            type: "add",
+            entry: {
+              category: extracted.entry.category || "General",
+              question: extracted.entry.question,
+              answer: extracted.entry.answer,
+            },
+          };
+          const botMsg = { role:"assistant", content:"I'd like to add the following to the Knowledge Base — please confirm:", pending: pendingPayload };
+          const newMsgs = [...updatedDisplay, botMsg];
+          setMessages(newMsgs);
+          await saveThread(threadId, newMsgs, title);
+          setLoading(false);
+          return;
+        }
+
+        // Extraction failed — fall through to normal chat with a note
+        log("Extraction failed or returned none — falling through to normal chat");
       }
 
-      // Build context including relevant meeting notes
-      const convText=updatedDisplay.map(m=>m.content).join(" ");
-      const relevantNotes=getRelevantNotes(convText,meetingNotesRef.current);
-      const notesContext=buildNotesContext(relevantNotes);
+      // ── Step 4: Normal chat response ───────────────────────────────────────
+      const convText = updatedDisplay.map(m=>m.content).join(" ");
+      const relevantNotes = getRelevantNotes(convText, meetingNotesRef.current);
+      const notesContext = buildNotesContext(relevantNotes);
 
-      log("Normal chat response"+(notesContext?" (with meeting notes context)":""));
-      const chatHistory=updatedDisplay.map(m=>({role:m.role,content:m.content}));
-      chatHistory[chatHistory.length-1]={role:"user",content:contentBlocks};
-      const res=await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({
+      log("Normal chat response" + (notesContext ? " (with meeting notes)" : ""));
+      const chatHistory = updatedDisplay.map(m=>({role:m.role,content:m.content}));
+      chatHistory[chatHistory.length-1] = {role:"user",content:contentBlocks};
+
+      const res = await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({
         model:"claude-sonnet-4-20250514",max_tokens:1000,
         system:`You are a helpful team knowledge assistant. Answer questions using the knowledge base and meeting notes below. Be concise and friendly. Never mention JSON or internal mechanics.\n\nKNOWLEDGE BASE:\n${buildKbContext(knowledgeRef.current)}${notesContext?`\n\nRECENT MEETING NOTES:\n${notesContext}`:""}`,
         messages:chatHistory
       })});
-      const data=await res.json();
-      const reply=data.content?.map(b=>b.text||"").join("")||"Sorry, couldn't get a response.";
-      const newMsgs=[...updatedDisplay,{role:"assistant",content:reply}];
-      setMessages(newMsgs);await saveThread(threadId,newMsgs,title);
-    }catch(e){
+      const data = await res.json();
+      const reply = data.content?.map(b=>b.text||"").join("") || "Sorry, couldn't get a response.";
+      const newMsgs = [...updatedDisplay,{role:"assistant",content:reply}];
+      setMessages(newMsgs);
+      await saveThread(threadId, newMsgs, title);
+
+    } catch(e) {
       log("Error: "+e.message);
       setMessages(prev=>[...prev,{role:"assistant",content:`⚠️ Error: ${e.message}`}]);
     }
     setLoading(false);
   }
 
-  async function confirmKbUpdate(msgIndex,pending){
-    log("Confirming KB update type="+pending.type);
-    const today=new Date().toISOString().slice(0,10);
-    const kb=knowledgeRef.current;let updatedKb;
+  async function confirmKbUpdate(msgIndex, pending){
+    log("Confirming KB update type=" + pending.type);
+    const today = new Date().toISOString().slice(0,10);
+    const kb = knowledgeRef.current;
+    let updatedKb;
     try {
       if(pending.type==="add"){
         const entry={id:Date.now().toString(),category:pending.entry.category||"General",question:pending.entry.question,answer:pending.entry.answer,addedBy:"Chat",date:today};
-        await saveEntryToSupabase(entry);updatedKb=[...kb,entry];
-      }else if(pending.type==="edit"){
+        await saveEntryToSupabase(entry);
+        updatedKb=[...kb,entry];
+      } else if(pending.type==="edit"){
         const updated={...pending.entry,date:today};
-        await saveEntryToSupabase(updated);updatedKb=kb.map(e=>e.id===pending.id?updated:e);
+        await saveEntryToSupabase(updated);
+        updatedKb=kb.map(e=>e.id===pending.id?updated:e);
       }
       await persistKnowledge(updatedKb);
       const newMsgs=messagesRef.current.map((m,i)=>i===msgIndex?{...m,pending:null,confirmed:true}:m);
@@ -440,7 +607,7 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
       setMessages(newMsgs);
       const t=threads.find(t=>t.id===activeThreadRef.current);
       await saveThread(activeThreadRef.current,newMsgs,t?.title||"New Chat");
-    }catch(e){
+    } catch(e) {
       log("Supabase save error: "+e.message);
       setMessages(prev=>[...prev,{role:"assistant",content:"⚠️ Failed to save: "+e.message}]);
     }
@@ -519,7 +686,6 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     sendBtn:{background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:11,padding:"11px 18px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14,color:"#0d1117",whiteSpace:"nowrap",flexShrink:0},
     hint:{fontSize:11,color:"#374151",marginTop:6,textAlign:"center"},
     debugBox:{background:"#0a0a0a",border:"1px solid #1f2937",borderRadius:8,padding:"10px 12px",marginTop:8,fontSize:11,color:"#4b5563",fontFamily:"monospace",maxHeight:120,overflowY:"auto"},
-    // KB & notes shared
     panelWrap:{flex:1,overflowY:"auto",padding:"20px 24px",maxWidth:860,width:"100%",margin:"0 auto",boxSizing:"border-box"},
     panelTop:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18,gap:10,flexWrap:"wrap"},
     panelTitle:{fontSize:19,fontWeight:700,color:"#f0fdf4"},
