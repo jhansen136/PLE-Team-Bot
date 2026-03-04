@@ -7,7 +7,7 @@ const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const WELCOME = "Hey! I'm your team's knowledge bot 👋 Ask me anything, or tell me something to update — like *\"Update the ECD to May 28\"* — and I'll confirm before saving.";
+const WELCOME = "Hey! I'm your team's knowledge bot 👋 Ask me anything about projects, meeting notes, or tell me something to update in the KB.";
 
 async function sha256(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
@@ -49,62 +49,81 @@ function ConfirmCard({pending, onConfirm, onCancel}) {
 }
 
 function groupThreads(threads) {
-  const now = new Date();
-  const today = new Date(now.getFullYear(),now.getMonth(),now.getDate());
-  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate()-1);
-  const week = new Date(today); week.setDate(week.getDate()-7);
-  const groups = {Today:[],Yesterday:[],"Past 7 Days":[],"Older":[]};
+  const now=new Date();
+  const today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const yesterday=new Date(today);yesterday.setDate(yesterday.getDate()-1);
+  const week=new Date(today);week.setDate(week.getDate()-7);
+  const groups={Today:[],Yesterday:[],"Past 7 Days":[],"Older":[]};
   threads.forEach(t=>{
-    const d = new Date(t.updated_at);
-    if(d>=today) groups.Today.push(t);
-    else if(d>=yesterday) groups.Yesterday.push(t);
-    else if(d>=week) groups["Past 7 Days"].push(t);
+    const d=new Date(t.updated_at);
+    if(d>=today)groups.Today.push(t);
+    else if(d>=yesterday)groups.Yesterday.push(t);
+    else if(d>=week)groups["Past 7 Days"].push(t);
     else groups.Older.push(t);
   });
   return groups;
 }
 
 export default function App() {
-  const [user, setUser] = useState(null);
-  const [loginUser, setLoginUser] = useState("");
-  const [loginPass, setLoginPass] = useState("");
-  const [loginErr, setLoginErr] = useState("");
-  const [loggingIn, setLoggingIn] = useState(false);
+  const [user,setUser]=useState(null);
+  const [loginUser,setLoginUser]=useState("");
+  const [loginPass,setLoginPass]=useState("");
+  const [loginErr,setLoginErr]=useState("");
+  const [loggingIn,setLoggingIn]=useState(false);
 
-  const [tab, setTab] = useState("chat");
-  const [threads, setThreads] = useState([]);
-  const [activeThreadId, setActiveThreadId] = useState(null);
-  const [messages, setMessages] = useState([{role:"assistant",content:WELCOME}]);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [tab,setTab]=useState("chat");
+  const [threads,setThreads]=useState([]);
+  const [activeThreadId,setActiveThreadId]=useState(null);
+  const [messages,setMessages]=useState([{role:"assistant",content:WELCOME}]);
+  const [sidebarOpen,setSidebarOpen]=useState(true);
 
-  const [input, setInput] = useState("");
-  const [pendingImage, setPendingImage] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [knowledge, setKnowledge] = useState([]);
-  const [newEntry, setNewEntry] = useState({category:"",question:"",answer:"",addedBy:""});
-  const [addingNew, setAddingNew] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState("");
-  const [editId, setEditId] = useState(null);
-  const [editEntry, setEditEntry] = useState({});
-  const [searchTerm, setSearchTerm] = useState("");
-  const [debugLog, setDebugLog] = useState([]);
-  const [showDebug, setShowDebug] = useState(false);
+  const [input,setInput]=useState("");
+  const [pendingImage,setPendingImage]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [knowledge,setKnowledge]=useState([]);
+  const [meetingNotes,setMeetingNotes]=useState([]);
 
-  const chatEndRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const textareaRef = useRef(null);
-  const knowledgeRef = useRef(knowledge);
-  const messagesRef = useRef(messages);
-  const activeThreadRef = useRef(activeThreadId);
+  // KB state
+  const [newEntry,setNewEntry]=useState({category:"",question:"",answer:"",addedBy:""});
+  const [addingNew,setAddingNew]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const [saveMsg,setSaveMsg]=useState("");
+  const [editId,setEditId]=useState(null);
+  const [editEntry,setEditEntry]=useState({});
+  const [searchTerm,setSearchTerm]=useState("");
+
+  // Meeting notes state
+  const [noteMode,setNoteMode]=useState("structured"); // "structured" | "raw"
+  const [addingNote,setAddingNote]=useState(false);
+  const [noteForm,setNoteForm]=useState({project:"",date:"",attendees:"",key_decisions:"",action_items:"",raw_notes:""});
+  const [rawPaste,setRawPaste]=useState("");
+  const [processingRaw,setProcessingRaw]=useState(false);
+  const [savingNote,setSavingNote]=useState(false);
+  const [noteSaveMsg,setNoteSaveMsg]=useState("");
+  const [noteSearch,setNoteSearch]=useState("");
+  const [expandedNote,setExpandedNote]=useState(null);
+  const [editNoteId,setEditNoteId]=useState(null);
+  const [editNoteForm,setEditNoteForm]=useState({});
+
+  const [debugLog,setDebugLog]=useState([]);
+  const [showDebug,setShowDebug]=useState(false);
+
+  const chatEndRef=useRef(null);
+  const fileInputRef=useRef(null);
+  const textareaRef=useRef(null);
+  const knowledgeRef=useRef(knowledge);
+  const meetingNotesRef=useRef(meetingNotes);
+  const messagesRef=useRef(messages);
+  const activeThreadRef=useRef(activeThreadId);
   useEffect(()=>{knowledgeRef.current=knowledge;},[knowledge]);
+  useEffect(()=>{meetingNotesRef.current=meetingNotes;},[meetingNotes]);
   useEffect(()=>{messagesRef.current=messages;},[messages]);
   useEffect(()=>{activeThreadRef.current=activeThreadId;},[activeThreadId]);
 
   function log(msg){console.log("[TeamBot]",msg);setDebugLog(prev=>[...prev.slice(-19),`${new Date().toLocaleTimeString()} ${msg}`]);}
 
   function autoResize(){
-    const el=textareaRef.current; if(!el)return;
+    const el=textareaRef.current;if(!el)return;
     el.style.height="auto";
     const max=22*18+22;
     el.style.height=Math.min(el.scrollHeight,max)+"px";
@@ -112,15 +131,14 @@ export default function App() {
   }
   function resetTextarea(){if(textareaRef.current){textareaRef.current.style.height="44px";textareaRef.current.style.overflowY="hidden";}}
 
-  async function handleLogin() {
+  async function handleLogin(){
     if(!loginUser.trim()||!loginPass.trim()){setLoginErr("Please enter username and password.");return;}
     setLoggingIn(true);setLoginErr("");
     try {
       const hash=await sha256(loginPass);
       const {data,error}=await supabase.from("users").select("*").eq("username",loginUser.trim().toLowerCase()).eq("password_hash",hash).single();
       if(error||!data){setLoginErr("Invalid username or password.");setLoggingIn(false);return;}
-      setUser(data);
-      localStorage.setItem("teambot_user",JSON.stringify(data));
+      setUser(data);localStorage.setItem("teambot_user",JSON.stringify(data));
     }catch(e){setLoginErr("Login failed: "+e.message);}
     setLoggingIn(false);
   }
@@ -140,9 +158,17 @@ export default function App() {
       try {
         const {data,error}=await supabase.from("knowledge_base").select("*").order("created_at");
         if(error)throw error;
-        const mapped=data.map(r=>({id:r.id,category:r.category,question:r.question,answer:r.answer,addedBy:r.added_by,date:r.date}));
-        setKnowledge(mapped);log("KB loaded: "+mapped.length+" entries");
+        setKnowledge(data.map(r=>({id:r.id,category:r.category,question:r.question,answer:r.answer,addedBy:r.added_by,date:r.date})));
+        log("KB loaded");
       }catch(e){log("KB load error: "+e.message);}
+    })();
+    (async()=>{
+      try {
+        const {data,error}=await supabase.from("meeting_notes").select("*").order("date",{ascending:false});
+        if(error)throw error;
+        setMeetingNotes(data||[]);
+        log("Meeting notes loaded: "+(data?.length||0));
+      }catch(e){log("Meeting notes load error: "+e.message);}
     })();
   },[]);
 
@@ -152,7 +178,7 @@ export default function App() {
       try {
         const {data,error}=await supabase.from("chat_threads").select("*").eq("user_id",user.id).order("updated_at",{ascending:false});
         if(error)throw error;
-        setThreads(data||[]);log("Threads loaded: "+(data?.length||0));
+        setThreads(data||[]);
       }catch(e){log("Threads load error: "+e.message);}
     })();
   },[user]);
@@ -179,34 +205,39 @@ export default function App() {
     }catch(e){log("Thread save error: "+e.message);}
   }
 
-  function newChat(){
-    setActiveThreadId(null);
-    activeThreadRef.current=null;
-    setMessages([{role:"assistant",content:WELCOME}]);
-    setInput("");resetTextarea();
-  }
-
+  function newChat(){setActiveThreadId(null);activeThreadRef.current=null;setMessages([{role:"assistant",content:WELCOME}]);setInput("");resetTextarea();}
   function loadThread(thread){
-    setActiveThreadId(thread.id);
-    activeThreadRef.current=thread.id;
-    try{setMessages(JSON.parse(thread.messages)||[{role:"assistant",content:WELCOME}]);}
-    catch(e){setMessages([{role:"assistant",content:WELCOME}]);}
+    setActiveThreadId(thread.id);activeThreadRef.current=thread.id;
+    try{setMessages(JSON.parse(thread.messages)||[{role:"assistant",content:WELCOME}]);}catch(e){setMessages([{role:"assistant",content:WELCOME}]);}
     setTab("chat");
   }
-
   async function deleteThread(e,threadId){
     e.stopPropagation();
     try {
       await supabase.from("chat_threads").delete().eq("id",threadId);
       setThreads(prev=>prev.filter(t=>t.id!==threadId));
-      if(activeThreadRef.current===threadId){
-        setActiveThreadId(null);activeThreadRef.current=null;
-        setMessages([{role:"assistant",content:WELCOME}]);
-      }
+      if(activeThreadRef.current===threadId){setActiveThreadId(null);activeThreadRef.current=null;setMessages([{role:"assistant",content:WELCOME}]);}
     }catch(e){log("Thread delete error: "+e.message);}
   }
 
-  function buildContext(kb){
+  // Get recent meeting notes for a project mentioned in the conversation
+  function getRelevantNotes(conversationText, allNotes, maxNotes=2) {
+    const lower = conversationText.toLowerCase();
+    const projectNotes = allNotes.filter(n => lower.includes(n.project.toLowerCase()));
+    if(projectNotes.length > 0) return projectNotes.slice(0, maxNotes);
+    return allNotes.slice(0, maxNotes); // fallback: most recent 2
+  }
+
+  function buildNotesContext(notes) {
+    if(!notes.length) return "";
+    return notes.map(n=>`[Meeting: ${n.project} | ${n.date}]
+Attendees: ${n.attendees||"N/A"}
+Key Decisions: ${n.key_decisions||"N/A"}
+Action Items: ${n.action_items||"N/A"}
+Notes: ${n.raw_notes?.slice(0,300)||"N/A"}`).join("\n\n");
+  }
+
+  function buildKbContext(kb){
     if(!kb.length)return"No entries yet.";
     return kb.map(e=>`[id:${e.id}][${e.category||"General"}] Q: ${e.question}\nA: ${e.answer}`).join("\n\n");
   }
@@ -226,9 +257,72 @@ export default function App() {
     return data.content?.map(b=>b.text||"").join("").trim()||"";
   }
 
-  async function generateTitle(firstUserMsg){
-    try{return await callClaude("Generate a short 4-6 word title for a chat that starts with this message. Reply with only the title, no punctuation.",firstUserMsg,30);}
-    catch(e){return firstUserMsg.slice(0,40);}
+  async function generateTitle(msg){
+    try{return await callClaude("Generate a short 4-6 word title for a chat that starts with this message. Reply with only the title, no punctuation.",msg,30);}
+    catch(e){return msg.slice(0,40);}
+  }
+
+  // Process raw meeting notes with AI
+  async function processRawNotes(){
+    if(!rawPaste.trim())return;
+    setProcessingRaw(true);
+    try {
+      const result=await callClaude(
+        `You extract structured info from meeting notes. Output ONLY raw JSON, no markdown, no backticks.
+Format: {"project":"...","date":"YYYY-MM-DD","attendees":"comma separated names","key_decisions":"bullet points of key decisions","action_items":"bullet points of action items with owners if mentioned","raw_notes":"full original text"}
+If date is not found use today: ${new Date().toISOString().slice(0,10)}
+If project name not found use "Unknown Project"`,
+        rawPaste, 800
+      );
+      const clean=result.replace(/^```[\w]*\n?/,"").replace(/\n?```$/,"").trim();
+      const parsed=JSON.parse(clean);
+      setNoteForm(parsed);
+      setNoteMode("structured");
+      log("Raw notes processed successfully");
+    }catch(e){log("Raw notes processing error: "+e.message);}
+    setProcessingRaw(false);
+  }
+
+  async function saveNote(){
+    if(!noteForm.project?.trim()||!noteForm.date?.trim())return;
+    setSavingNote(true);
+    try {
+      const note={
+        id:"note-"+Date.now(),
+        project:noteForm.project.trim(),
+        date:noteForm.date,
+        attendees:noteForm.attendees||"",
+        key_decisions:noteForm.key_decisions||"",
+        action_items:noteForm.action_items||"",
+        raw_notes:noteForm.raw_notes||rawPaste||"",
+        created_by:user?.username||"Unknown"
+      };
+      const {error}=await supabase.from("meeting_notes").insert(note);
+      if(error)throw error;
+      setMeetingNotes(prev=>[note,...prev]);
+      setNoteForm({project:"",date:"",attendees:"",key_decisions:"",action_items:"",raw_notes:""});
+      setRawPaste("");setAddingNote(false);
+      setNoteSaveMsg("Meeting notes saved!");setTimeout(()=>setNoteSaveMsg(""),2500);
+      log("Meeting note saved");
+    }catch(e){log("Save note error: "+e.message);}
+    setSavingNote(false);
+  }
+
+  async function deleteNote(id){
+    try {
+      await supabase.from("meeting_notes").delete().eq("id",id);
+      setMeetingNotes(prev=>prev.filter(n=>n.id!==id));
+    }catch(e){log("Delete note error: "+e.message);}
+  }
+
+  async function saveEditNote(id){
+    try {
+      const {error}=await supabase.from("meeting_notes").update(editNoteForm).eq("id",id);
+      if(error)throw error;
+      setMeetingNotes(prev=>prev.map(n=>n.id===id?{...n,...editNoteForm}:n));
+      setEditNoteId(null);
+      setNoteSaveMsg("Notes updated!");setTimeout(()=>setNoteSaveMsg(""),2500);
+    }catch(e){log("Edit note error: "+e.message);}
   }
 
   async function sendMessage(){
@@ -270,20 +364,13 @@ Reply only "NO" for questions, greetings, or general conversation with no pendin
 
         const extractAnswer=await callClaude(
           `Extract a KB update from the conversation and output ONLY a raw JSON object — no markdown, no backticks, no explanation, just JSON starting with {.
-
-KB entries (id | category | question | answer preview):
-${kbSummary}
-
-Most relevant existing entry (FULL raw answer text):
+KB entries: ${kbSummary}
+Most relevant entry FULL answer:
 ID: ${bestMatch?.id}
 Answer: ${bestMatch?.answer}
-
-Recent conversation:
-${recentConv}
-
-Output format:
+Recent conversation: ${recentConv}
 For NEW: {"type":"add","entry":{"category":"...","question":"...","answer":"..."}}
-For EDIT: {"type":"edit","id":"<exact id>","oldSnippet":"<copy exact chars from answer above>","newSnippet":"<replacement>"}
+For EDIT: {"type":"edit","id":"<exact id>","oldSnippet":"<copy exact chars from answer>","newSnippet":"<replacement>"}
 CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
           userText,200
         );
@@ -296,10 +383,9 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
           const existing=knowledgeRef.current.find(e=>e.id===parsed.id);
           if(existing){
             const found=parsed.oldSnippet&&existing.answer.includes(parsed.oldSnippet);
-            if(!found)log("WARNING: oldSnippet not found: "+parsed.oldSnippet?.slice(0,60));
+            if(!found)log("WARNING: oldSnippet not found");
             const updated=found?existing.answer.replace(parsed.oldSnippet,parsed.newSnippet):existing.answer;
             parsed={type:"edit",id:parsed.id,oldAnswer:parsed.oldSnippet,newSnippet:parsed.newSnippet,entry:{...existing,answer:updated}};
-            log(found?"Snippet replace ready":"Snippet not found");
           }
         }
 
@@ -307,21 +393,28 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
           log("Showing confirm card");
           const botMsg={role:"assistant",content:"I'd like to make the following change to the Knowledge Base — please confirm:",pending:parsed};
           const newMsgs=[...updatedDisplay,botMsg];
-          setMessages(newMsgs);
-          await saveThread(threadId,newMsgs,title);
+          setMessages(newMsgs);await saveThread(threadId,newMsgs,title);
           setLoading(false);return;
         }else{log("Extraction failed, falling through to chat");}
       }
 
-      log("Normal chat response");
+      // Build context including relevant meeting notes
+      const convText=updatedDisplay.map(m=>m.content).join(" ");
+      const relevantNotes=getRelevantNotes(convText,meetingNotesRef.current);
+      const notesContext=buildNotesContext(relevantNotes);
+
+      log("Normal chat response"+(notesContext?" (with meeting notes context)":""));
       const chatHistory=updatedDisplay.map(m=>({role:m.role,content:m.content}));
       chatHistory[chatHistory.length-1]={role:"user",content:contentBlocks};
-      const res=await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:`You are a helpful team knowledge assistant. Answer questions using the knowledge base below. Be concise and friendly. Never mention JSON, KB mechanics, or your own update process.\n\nKNOWLEDGE BASE:\n${buildContext(knowledgeRef.current)}`,messages:chatHistory})});
+      const res=await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({
+        model:"claude-sonnet-4-20250514",max_tokens:1000,
+        system:`You are a helpful team knowledge assistant. Answer questions using the knowledge base and meeting notes below. Be concise and friendly. Never mention JSON or internal mechanics.\n\nKNOWLEDGE BASE:\n${buildKbContext(knowledgeRef.current)}${notesContext?`\n\nRECENT MEETING NOTES:\n${notesContext}`:""}`,
+        messages:chatHistory
+      })});
       const data=await res.json();
       const reply=data.content?.map(b=>b.text||"").join("")||"Sorry, couldn't get a response.";
       const newMsgs=[...updatedDisplay,{role:"assistant",content:reply}];
-      setMessages(newMsgs);
-      await saveThread(threadId,newMsgs,title);
+      setMessages(newMsgs);await saveThread(threadId,newMsgs,title);
     }catch(e){
       log("Error: "+e.message);
       setMessages(prev=>[...prev,{role:"assistant",content:`⚠️ Error: ${e.message}`}]);
@@ -343,11 +436,10 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
       }
       await persistKnowledge(updatedKb);
       const newMsgs=messagesRef.current.map((m,i)=>i===msgIndex?{...m,pending:null,confirmed:true}:m);
-      newMsgs.push({role:"assistant",content:`✅ Done! KB has been ${pending.type==="add"?"updated with a new entry":"updated"}. Switch to the Knowledge Base tab to verify.`});
+      newMsgs.push({role:"assistant",content:`✅ Done! KB updated. Switch to the Knowledge Base tab to verify.`});
       setMessages(newMsgs);
       const t=threads.find(t=>t.id===activeThreadRef.current);
       await saveThread(activeThreadRef.current,newMsgs,t?.title||"New Chat");
-      log("KB saved to Supabase");
     }catch(e){
       log("Supabase save error: "+e.message);
       setMessages(prev=>[...prev,{role:"assistant",content:"⚠️ Failed to save: "+e.message}]);
@@ -374,10 +466,11 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
   }
   function startEdit(e){setEditId(e.id);setEditEntry({...e});}
   const filtered=knowledge.filter(e=>!searchTerm||[e.question,e.answer,e.category||""].some(v=>v.toLowerCase().includes(searchTerm.toLowerCase())));
+  const filteredNotes=meetingNotes.filter(n=>!noteSearch||[n.project,n.key_decisions||"",n.action_items||"",n.attendees||""].some(v=>v.toLowerCase().includes(noteSearch.toLowerCase())));
   function md(t){return t.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\*(.*?)\*/g,'<em>$1</em>').replace(/\n/g,'<br/>');}
 
   const s={
-    root:{fontFamily:"'DM Sans','Segoe UI',sans-serif",background:"#0d1117",minHeight:"100vh",display:"flex",flexDirection:"column",color:"#e2e8f0"},
+    root:{fontFamily:"'DM Sans','Segoe UI',sans-serif",background:"#0d1117",color:"#e2e8f0"},
     loginWrap:{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0d1117"},
     loginCard:{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:16,padding:"40px 36px",width:340},
     loginLogo:{display:"flex",alignItems:"center",gap:10,marginBottom:28},
@@ -388,8 +481,7 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     loginInput:{width:"100%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:9,padding:"10px 13px",color:"#e2e8f0",fontFamily:"inherit",fontSize:14,outline:"none",boxSizing:"border-box",marginBottom:14},
     loginBtn:{width:"100%",background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:9,padding:"11px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14,color:"#0d1117"},
     loginErr:{fontSize:12,color:"#fca5a5",marginTop:10,textAlign:"center"},
-    appWrap:{display:"flex",flex:1,overflow:"hidden",height:"100vh"},
-    sidebar:{width:sidebarOpen?260:0,minWidth:sidebarOpen?260:0,background:"#0d1f2d",borderRight:"1px solid rgba(255,255,255,0.07)",display:"flex",flexDirection:"column",overflow:"hidden",transition:"all 0.2s",height:"100vh",position:"sticky",top:0,flexShrink:0},
+    sidebar:{width:sidebarOpen?260:0,minWidth:sidebarOpen?260:0,background:"#0d1f2d",borderRight:"1px solid rgba(255,255,255,0.07)",display:"flex",flexDirection:"column",overflow:"hidden",transition:"all 0.2s",height:"100vh",flexShrink:0},
     sidebarInner:{width:260,display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"},
     sidebarTop:{padding:"16px 12px 10px",borderBottom:"1px solid rgba(255,255,255,0.06)",flexShrink:0},
     newChatBtn:{width:"100%",background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:9,padding:"9px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:13,color:"#0d1117",display:"flex",alignItems:"center",justifyContent:"center",gap:6},
@@ -411,7 +503,7 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     logoIcon:{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"#0d1117",fontWeight:"bold"},
     logoText:{fontSize:16,fontWeight:700,color:"#f0fdf4"},
     tabs:{display:"flex",gap:3,background:"rgba(255,255,255,0.05)",borderRadius:10,padding:3},
-    tab:(a)=>({padding:"6px 14px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,transition:"all 0.2s",background:a?"linear-gradient(135deg,#6ee7b7,#3b82f6)":"transparent",color:a?"#0d1117":"#94a3b8"}),
+    tab:(a)=>({padding:"6px 12px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:600,transition:"all 0.2s",background:a?"linear-gradient(135deg,#6ee7b7,#3b82f6)":"transparent",color:a?"#0d1117":"#94a3b8",whiteSpace:"nowrap"}),
     badge:{background:"#6ee7b7",color:"#0d1117",borderRadius:20,padding:"1px 6px",fontSize:11,fontWeight:700,marginLeft:4},
     main:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minHeight:0},
     chatArea:{flex:1,overflowY:"auto",padding:"20px 24px",display:"flex",flexDirection:"column",gap:14,maxWidth:740,width:"100%",margin:"0 auto",boxSizing:"border-box"},
@@ -427,9 +519,10 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     sendBtn:{background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:11,padding:"11px 18px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14,color:"#0d1117",whiteSpace:"nowrap",flexShrink:0},
     hint:{fontSize:11,color:"#374151",marginTop:6,textAlign:"center"},
     debugBox:{background:"#0a0a0a",border:"1px solid #1f2937",borderRadius:8,padding:"10px 12px",marginTop:8,fontSize:11,color:"#4b5563",fontFamily:"monospace",maxHeight:120,overflowY:"auto"},
-    kbWrap:{flex:1,overflowY:"auto",padding:"20px 24px",maxWidth:800,width:"100%",margin:"0 auto",boxSizing:"border-box"},
-    kbTop:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18,gap:10,flexWrap:"wrap"},
-    kbTitle:{fontSize:19,fontWeight:700,color:"#f0fdf4"},
+    // KB & notes shared
+    panelWrap:{flex:1,overflowY:"auto",padding:"20px 24px",maxWidth:860,width:"100%",margin:"0 auto",boxSizing:"border-box"},
+    panelTop:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18,gap:10,flexWrap:"wrap"},
+    panelTitle:{fontSize:19,fontWeight:700,color:"#f0fdf4"},
     searchInput:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:9,padding:"8px 13px",color:"#e2e8f0",fontFamily:"inherit",fontSize:13,outline:"none",width:190},
     addBtn:{background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:9,padding:"8px 16px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:13,color:"#0d1117"},
     card:{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:13,padding:"15px 18px",marginBottom:10},
@@ -441,15 +534,23 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
     editBtn:{background:"rgba(59,130,246,0.12)",border:"1px solid rgba(59,130,246,0.25)",borderRadius:7,padding:"5px 11px",cursor:"pointer",fontFamily:"inherit",fontSize:12,color:"#93c5fd"},
     deleteBtn:{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:7,padding:"5px 11px",cursor:"pointer",fontFamily:"inherit",fontSize:12,color:"#fca5a5"},
     saveBtn:{background:"rgba(110,231,183,0.12)",border:"1px solid rgba(110,231,183,0.25)",borderRadius:7,padding:"5px 11px",cursor:"pointer",fontFamily:"inherit",fontSize:12,color:"#6ee7b7"},
+    expandBtn:{background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.09)",borderRadius:7,padding:"5px 11px",cursor:"pointer",fontFamily:"inherit",fontSize:12,color:"#94a3b8"},
     formCard:{background:"rgba(110,231,183,0.04)",border:"1px solid rgba(110,231,183,0.18)",borderRadius:13,padding:"18px",marginBottom:14},
     formTitle:{fontSize:13,fontWeight:700,color:"#6ee7b7",marginBottom:12},
     formRow:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9},
     fInput:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 11px",color:"#e2e8f0",fontFamily:"inherit",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"},
-    fTextarea:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 11px",color:"#e2e8f0",fontFamily:"inherit",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box",resize:"vertical",minHeight:75},
+    fTextarea:{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 11px",color:"#e2e8f0",fontFamily:"inherit",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box",resize:"vertical",minHeight:90},
     formBtns:{display:"flex",gap:7,marginTop:11,justifyContent:"flex-end"},
     cancelBtn:{background:"transparent",border:"1px solid rgba(255,255,255,0.09)",borderRadius:8,padding:"6px 14px",cursor:"pointer",fontFamily:"inherit",fontSize:13,color:"#94a3b8"},
     successMsg:{background:"rgba(110,231,183,0.08)",border:"1px solid rgba(110,231,183,0.2)",borderRadius:8,padding:"7px 13px",fontSize:13,color:"#6ee7b7",marginBottom:11},
     empty:{textAlign:"center",color:"#4b5563",padding:"50px 20px",fontSize:14},
+    modeToggle:{display:"flex",gap:3,background:"rgba(255,255,255,0.05)",borderRadius:9,padding:3,marginBottom:14},
+    modeBtn:(a)=>({flex:1,padding:"7px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:600,background:a?"rgba(110,231,183,0.15)":"transparent",color:a?"#6ee7b7":"#6b7280"}),
+    noteField:{marginBottom:10},
+    noteFieldLabel:{fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:0.8,color:"#4b5563",marginBottom:3},
+    noteFieldVal:{fontSize:13,color:"#94a3b8",lineHeight:1.6,whiteSpace:"pre-wrap"},
+    noteBadge:{display:"inline-block",background:"rgba(110,231,183,0.1)",border:"1px solid rgba(110,231,183,0.2)",borderRadius:20,padding:"2px 9px",fontSize:11,color:"#6ee7b7",marginRight:6,marginBottom:4},
+    processBtn:{background:"linear-gradient(135deg,#6ee7b7,#3b82f6)",border:"none",borderRadius:8,padding:"8px 16px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:13,color:"#0d1117"},
   };
 
   const iconBtn={background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.09)",borderRadius:8,padding:"7px 11px",cursor:"pointer",fontSize:12,color:"#6b7280",fontFamily:"inherit"};
@@ -520,13 +621,15 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
             <div style={s.tabs}>
               <button style={s.tab(tab==="chat")} onClick={()=>setTab("chat")}>💬 Chat</button>
-              <button style={s.tab(tab==="kb")} onClick={()=>setTab("kb")}>📚 Knowledge Base<span style={s.badge}>{knowledge.length}</span></button>
+              <button style={s.tab(tab==="kb")} onClick={()=>setTab("kb")}>📚 KB<span style={s.badge}>{knowledge.length}</span></button>
+              <button style={s.tab(tab==="notes")} onClick={()=>setTab("notes")}>📋 Meeting Notes<span style={s.badge}>{meetingNotes.length}</span></button>
             </div>
             {tab==="chat"&&<button onClick={()=>setShowDebug(v=>!v)} style={iconBtn}>🔍</button>}
           </div>
         </header>
 
         <div style={s.main}>
+          {/* Chat tab */}
           {tab==="chat"&&<>
             <div style={s.chatArea}>
               {messages.map((m,i)=>(
@@ -545,16 +648,17 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
               <div style={s.inputRow}>
                 <input ref={fileInputRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFileChange}/>
                 <button style={s.uploadBtn} onClick={()=>fileInputRef.current?.click()}>📎</button>
-                <textarea ref={textareaRef} style={s.chatInput} placeholder="Ask something, or say what to update…" value={input} onChange={e=>{setInput(e.target.value);autoResize();}} onPaste={handlePaste} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}/>
+                <textarea ref={textareaRef} style={s.chatInput} placeholder="Ask about projects, meetings, or say what to update…" value={input} onChange={e=>{setInput(e.target.value);autoResize();}} onPaste={handlePaste} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}}}/>
                 <button style={{...s.sendBtn,opacity:loading?0.6:1}} onClick={sendMessage} disabled={loading}>Send →</button>
               </div>
               <div style={s.hint}>Shift+Enter for new line · 📎 upload or paste image</div>
             </div>
           </>}
 
-          {tab==="kb"&&<div style={s.kbWrap}>
-            <div style={s.kbTop}>
-              <div style={s.kbTitle}>Knowledge Base</div>
+          {/* KB tab */}
+          {tab==="kb"&&<div style={s.panelWrap}>
+            <div style={s.panelTop}>
+              <div style={s.panelTitle}>Knowledge Base</div>
               <div style={{display:"flex",gap:8,alignItems:"center"}}>
                 <input style={s.searchInput} placeholder="Search..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}/>
                 <button style={s.addBtn} onClick={()=>{setAddingNew(true);setEditId(null);}}>+ Add Entry</button>
@@ -574,7 +678,7 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
                 <button style={s.addBtn} onClick={addEntry} disabled={saving}>{saving?"Saving...":"Save Entry"}</button>
               </div>
             </div>}
-            {filtered.length===0&&!addingNew&&<div style={s.empty}><div style={{fontSize:38,marginBottom:10}}>🧠</div>{searchTerm?"No entries match.":"No entries yet. Click '+ Add Entry' to start!"}</div>}
+            {filtered.length===0&&!addingNew&&<div style={s.empty}><div style={{fontSize:38,marginBottom:10}}>🧠</div>{searchTerm?"No entries match.":"No entries yet."}</div>}
             {filtered.map(entry=><div key={entry.id} style={s.card}>
               {editId===entry.id?<>
                 <div style={s.formTitle}>Editing Entry</div>
@@ -597,6 +701,116 @@ CRITICAL: oldSnippet must be CHARACTER FOR CHARACTER from the answer above.`,
                   <button style={s.editBtn} onClick={()=>startEdit(entry)}>Edit</button>
                   <button style={s.deleteBtn} onClick={()=>deleteEntry(entry.id)}>Delete</button>
                 </div>
+              </>}
+            </div>)}
+          </div>}
+
+          {/* Meeting Notes tab */}
+          {tab==="notes"&&<div style={s.panelWrap}>
+            <div style={s.panelTop}>
+              <div style={s.panelTitle}>📋 Meeting Notes</div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <input style={s.searchInput} placeholder="Search notes..." value={noteSearch} onChange={e=>setNoteSearch(e.target.value)}/>
+                <button style={s.addBtn} onClick={()=>{setAddingNote(true);setNoteMode("structured");setNoteForm({project:"",date:new Date().toISOString().slice(0,10),attendees:"",key_decisions:"",action_items:"",raw_notes:""});setRawPaste("");}}>+ Add Notes</button>
+              </div>
+            </div>
+            {noteSaveMsg&&<div style={s.successMsg}>✓ {noteSaveMsg}</div>}
+
+            {addingNote&&<div style={s.formCard}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={s.formTitle}>New Meeting Notes</div>
+              </div>
+              <div style={s.modeToggle}>
+                <button style={s.modeBtn(noteMode==="raw")} onClick={()=>setNoteMode("raw")}>📋 Paste Raw Notes</button>
+                <button style={s.modeBtn(noteMode==="structured")} onClick={()=>setNoteMode("structured")}>✏️ Enter Structured</button>
+              </div>
+
+              {noteMode==="raw"&&<>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",marginBottom:6}}>Paste your raw meeting notes below — the bot will extract the details automatically</label>
+                <textarea style={{...s.fTextarea,minHeight:160}} placeholder="Paste your meeting notes here..." value={rawPaste} onChange={e=>setRawPaste(e.target.value)}/>
+                <div style={{display:"flex",gap:8,marginTop:10,justifyContent:"flex-end"}}>
+                  <button style={s.cancelBtn} onClick={()=>setAddingNote(false)}>Cancel</button>
+                  <button style={s.processBtn} onClick={processRawNotes} disabled={processingRaw||!rawPaste.trim()}>{processingRaw?"Processing...":"Extract & Review →"}</button>
+                </div>
+              </>}
+
+              {noteMode==="structured"&&<>
+                <div style={s.formRow}>
+                  <div>
+                    <label style={{fontSize:12,color:"#6b7280",display:"block",marginBottom:4}}>Project *</label>
+                    <input style={s.fInput} placeholder="e.g. NADA API for RV" value={noteForm.project} onChange={e=>setNoteForm({...noteForm,project:e.target.value})}/>
+                  </div>
+                  <div>
+                    <label style={{fontSize:12,color:"#6b7280",display:"block",marginBottom:4}}>Date *</label>
+                    <input style={s.fInput} type="date" value={noteForm.date} onChange={e=>setNoteForm({...noteForm,date:e.target.value})}/>
+                  </div>
+                </div>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Attendees</label>
+                <input style={s.fInput} placeholder="e.g. Jordan, Brad, Mario" value={noteForm.attendees} onChange={e=>setNoteForm({...noteForm,attendees:e.target.value})}/>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Key Decisions</label>
+                <textarea style={s.fTextarea} placeholder="• Decision 1&#10;• Decision 2" value={noteForm.key_decisions} onChange={e=>setNoteForm({...noteForm,key_decisions:e.target.value})}/>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Action Items</label>
+                <textarea style={s.fTextarea} placeholder="• Action item 1 (Owner)&#10;• Action item 2 (Owner)" value={noteForm.action_items} onChange={e=>setNoteForm({...noteForm,action_items:e.target.value})}/>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Full Notes</label>
+                <textarea style={{...s.fTextarea,minHeight:120}} placeholder="Full meeting notes..." value={noteForm.raw_notes} onChange={e=>setNoteForm({...noteForm,raw_notes:e.target.value})}/>
+                <div style={s.formBtns}>
+                  <button style={s.cancelBtn} onClick={()=>setAddingNote(false)}>Cancel</button>
+                  <button style={s.addBtn} onClick={saveNote} disabled={savingNote||!noteForm.project?.trim()}>{savingNote?"Saving...":"Save Notes"}</button>
+                </div>
+              </>}
+            </div>}
+
+            {filteredNotes.length===0&&!addingNote&&<div style={s.empty}><div style={{fontSize:38,marginBottom:10}}>📋</div>{noteSearch?"No notes match your search.":"No meeting notes yet. Click '+ Add Notes' to get started!"}</div>}
+
+            {filteredNotes.map(note=><div key={note.id} style={s.card}>
+              {editNoteId===note.id?<>
+                <div style={s.formTitle}>Editing Note</div>
+                <div style={s.formRow}>
+                  <div>
+                    <label style={{fontSize:12,color:"#6b7280",display:"block",marginBottom:4}}>Project</label>
+                    <input style={s.fInput} value={editNoteForm.project||""} onChange={e=>setEditNoteForm({...editNoteForm,project:e.target.value})}/>
+                  </div>
+                  <div>
+                    <label style={{fontSize:12,color:"#6b7280",display:"block",marginBottom:4}}>Date</label>
+                    <input style={s.fInput} type="date" value={editNoteForm.date||""} onChange={e=>setEditNoteForm({...editNoteForm,date:e.target.value})}/>
+                  </div>
+                </div>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Attendees</label>
+                <input style={s.fInput} value={editNoteForm.attendees||""} onChange={e=>setEditNoteForm({...editNoteForm,attendees:e.target.value})}/>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Key Decisions</label>
+                <textarea style={s.fTextarea} value={editNoteForm.key_decisions||""} onChange={e=>setEditNoteForm({...editNoteForm,key_decisions:e.target.value})}/>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Action Items</label>
+                <textarea style={s.fTextarea} value={editNoteForm.action_items||""} onChange={e=>setEditNoteForm({...editNoteForm,action_items:e.target.value})}/>
+                <label style={{fontSize:12,color:"#6b7280",display:"block",margin:"10px 0 4px"}}>Full Notes</label>
+                <textarea style={{...s.fTextarea,minHeight:120}} value={editNoteForm.raw_notes||""} onChange={e=>setEditNoteForm({...editNoteForm,raw_notes:e.target.value})}/>
+                <div style={s.formBtns}>
+                  <button style={s.cancelBtn} onClick={()=>setEditNoteId(null)}>Cancel</button>
+                  <button style={s.saveBtn} onClick={()=>saveEditNote(note.id)}>Save Changes</button>
+                </div>
+              </>:<>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                  <div>
+                    <div style={{fontSize:15,fontWeight:700,color:"#f0fdf4"}}>{note.project}</div>
+                    <div style={{fontSize:12,color:"#4b5563",marginTop:2}}>{note.date}{note.attendees?` · ${note.attendees}`:""}</div>
+                  </div>
+                  <div style={{display:"flex",gap:6}}>
+                    <button style={s.expandBtn} onClick={()=>setExpandedNote(expandedNote===note.id?null:note.id)}>{expandedNote===note.id?"▲ Less":"▼ More"}</button>
+                    <button style={s.editBtn} onClick={()=>{setEditNoteId(note.id);setEditNoteForm({...note});}}>Edit</button>
+                    <button style={s.deleteBtn} onClick={()=>deleteNote(note.id)}>Delete</button>
+                  </div>
+                </div>
+                {note.key_decisions&&<div style={s.noteField}>
+                  <div style={s.noteFieldLabel}>Key Decisions</div>
+                  <div style={s.noteFieldVal}>{note.key_decisions}</div>
+                </div>}
+                {note.action_items&&<div style={s.noteField}>
+                  <div style={s.noteFieldLabel}>Action Items</div>
+                  <div style={s.noteFieldVal}>{note.action_items}</div>
+                </div>}
+                {expandedNote===note.id&&note.raw_notes&&<div style={s.noteField}>
+                  <div style={s.noteFieldLabel}>Full Notes</div>
+                  <div style={s.noteFieldVal}>{note.raw_notes}</div>
+                </div>}
               </>}
             </div>)}
           </div>}
