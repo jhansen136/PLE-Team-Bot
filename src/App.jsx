@@ -302,10 +302,10 @@ export default function App() {
     setAdoWILoading(true);setAdoWIError("");
     try{
       const wiql=adoWIFilter==="mine"
-        ?`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.AssignedTo]=@me AND [System.State]<>'Done' AND [System.State]<>'Closed' ORDER BY [System.ChangedDate] DESC`
+        ?`SELECT TOP 100 [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.AssignedTo]=@me AND [System.State]<>'Done' AND [System.State]<>'Closed' ORDER BY [System.ChangedDate] DESC`
         :adoWIFilter==="active"
-        ?`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`
-        :`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' ORDER BY [System.ChangedDate] DESC`;
+        ?`SELECT TOP 200 [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`
+        :`SELECT TOP 200 [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' ORDER BY [System.ChangedDate] DESC`;
       const items=await fetchWorkItems(pat,org,project,wiql);
       setAdoWorkItems(items);log(`ADO: ${items.length} work items`);
     }catch(e){setAdoWIError(e.message);log("ADO WI error: "+e.message);}
@@ -432,7 +432,7 @@ export default function App() {
     const lower=userText.toLowerCase();const lines=[];
     try{
       if(/work item|task|bug|ticket|assign|sprint|backlog|story|feature|epic/.test(lower)){
-        const wiql=`SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`;
+        const wiql=`SELECT TOP 50 [System.Id] FROM WorkItems WHERE [System.TeamProject]='${project}' AND [System.State] IN ('Active','In Progress','New','To Do') ORDER BY [System.ChangedDate] DESC`;
         const items=await fetchWorkItems(pat,org,project,wiql);
         if(items.length){lines.push("ACTIVE WORK ITEMS:");items.slice(0,25).forEach(wi=>lines.push(`#${wi.id} [${wi.type}] ${wi.title} | State: ${wi.state} | Assigned: ${wi.assignedTo}`));}
       }
