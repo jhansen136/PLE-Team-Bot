@@ -13,24 +13,30 @@ const DEFAULT_ADO_PROJECT = "nps";
 const WELCOME = "Hey! I'm your team's knowledge bot 👋 Ask me anything about projects, meeting notes, work items, PRs, sprints, or tell me something to update in the KB.";
 
 // ─── Azure DevOps API helpers ────────────────────────────────────────────────
+// All ADO calls are routed through /api/ado-proxy (Vercel serverless function)
+// to avoid CORS issues with direct browser-to-Azure DevOps calls.
 function adoBase(org, project) {
   return `https://dev.azure.com/${org}/${project}/_apis`;
 }
-function adoHeaders(pat) {
-  return {
-    "Content-Type": "application/json",
-    "Authorization": "Basic " + btoa(":" + pat),
-  };
+
+async function adoCall(url, pat, method="GET", body=null, contentType=null) {
+  const res = await fetch("/api/ado-proxy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, method, pat, body, contentType }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    throw new Error(data.detail || data.error || `ADO ${res.status}`);
+  }
+  return data;
 }
+
 async function adoGet(url, pat) {
-  const res = await fetch(url, { headers: adoHeaders(pat) });
-  if (!res.ok) { const t = await res.text(); throw new Error(`ADO ${res.status}: ${t.slice(0,200)}`); }
-  return res.json();
+  return adoCall(url, pat, "GET");
 }
 async function adoPost(url, pat, body) {
-  const res = await fetch(url, { method:"POST", headers:adoHeaders(pat), body:JSON.stringify(body) });
-  if (!res.ok) { const t = await res.text(); throw new Error(`ADO ${res.status}: ${t.slice(0,200)}`); }
-  return res.json();
+  return adoCall(url, pat, "POST", body);
 }
 
 async function fetchWorkItems(pat, org, project, wiql) {
@@ -55,12 +61,10 @@ async function createWorkItem(pat, org, project, type, title, description, assig
   const patchDoc = [{ op:"add", path:"/fields/System.Title", value:title }];
   if (description) patchDoc.push({ op:"add", path:"/fields/System.Description", value:description });
   if (assignedTo) patchDoc.push({ op:"add", path:"/fields/System.AssignedTo", value:assignedTo });
-  const res = await fetch(
+  return adoCall(
     `${adoBase(org, project)}/wit/workitems/$${encodeURIComponent(type||"Task")}?api-version=7.1`,
-    { method:"POST", headers:{...adoHeaders(pat),"Content-Type":"application/json-patch+json"}, body:JSON.stringify(patchDoc) }
+    pat, "POST", patchDoc, "application/json-patch+json"
   );
-  if (!res.ok) { const t = await res.text(); throw new Error(`ADO ${res.status}: ${t.slice(0,200)}`); }
-  return res.json();
 }
 
 async function fetchPRs(pat, org, project, repo, status) {
@@ -535,9 +539,46 @@ export default function App() {
   }
 
   async function processRawNotes(){
-    if(!rawPaste.trim())return;setProcessingRaw(true);
-    try{const result=await callClaude(`Extract structured info from meeting notes. Output ONLY raw JSON, no markdown.\nFormat: {"project":"...","date":"YYYY-MM-DD","attendees":"...","key_decisions":"...","action_items":"...","raw_notes":"..."}\nIf no date found use today: ${new Date().toISOString().slice(0,10)}\nIf no project use "Unknown Project"`,rawPaste,800);const parsed=safeParseJson(result);if(parsed){setNoteForm(parsed);setNoteMode("structured");}}
-    catch(e){log("Raw notes error: "+e.message);}setProcessingRaw(false);
+    if(!rawPaste.trim())return;
+    setProcessingRaw(true);
+    try{
+      const today=new Date().toISOString().slice(0,10);
+      const result=await callClaude(
+        `Extract structured info from these meeting notes. Output ONLY a raw JSON object, no markdown, no backticks, no explanation.
+Required fields:
+- project: name of the project or team discussed (string, use "Unknown Project" if not found)
+- date: meeting date as YYYY-MM-DD (use ${today} if not found)
+- attendees: comma-separated list of names (string)
+- key_decisions: bullet points of key decisions made (string, use "• " prefix per line)
+- action_items: bullet points of action items with owner names if mentioned (string, use "• " prefix per line)
+Do NOT include a raw_notes field. Output only the JSON object starting with {`,
+        rawPaste.slice(0, 6000),
+        1200
+      );
+      log("Raw notes API response: "+result.slice(0,120));
+      const parsed=safeParseJson(result);
+      if(parsed){
+        setNoteForm({
+          project: parsed.project||"",
+          date: parsed.date||today,
+          attendees: parsed.attendees||"",
+          key_decisions: parsed.key_decisions||"",
+          action_items: parsed.action_items||"",
+          raw_notes: rawPaste,
+        });
+        setNoteMode("structured");
+        log("Raw notes processed OK");
+      } else {
+        log("Raw notes: parse failed. Raw: "+result.slice(0,200));
+        setNoteSaveMsg("Could not extract notes — try again or enter manually.");
+        setTimeout(()=>setNoteSaveMsg(""),4000);
+      }
+    }catch(e){
+      log("Raw notes error: "+e.message);
+      setNoteSaveMsg("Error extracting notes: "+e.message);
+      setTimeout(()=>setNoteSaveMsg(""),4000);
+    }
+    setProcessingRaw(false);
   }
   async function saveNote(){
     if(!noteForm.project?.trim()||!noteForm.date?.trim())return;setSavingNote(true);
@@ -849,7 +890,7 @@ export default function App() {
             {/* Work Items */}
             {adoSubTab==="workitems"&&<>
               {adoWISuccess&&<div style={s.successMsg}>✓ {adoWISuccess}</div>}
-              {adoWIError&&<div style={s.errMsg}>⚠️ {adoWIError}</div>}
+              {adoWIError&&<div style={s.errMsg}>⚠️ {adoWIError==="CORS_BLOCK"?"Azure DevOps blocked the request — your PAT or org/project may be incorrect, or Azure requires a server-side proxy for this endpoint.":adoWIError}</div>}
               <div style={s.adoFilterRow}>
                 {["active","mine","all"].map(f=><button key={f} style={s.adoFilterBtn(adoWIFilter===f)} onClick={()=>setAdoWIFilter(f)}>{f==="active"?"Active":f==="mine"?"Assigned to Me":"All"}</button>)}
                 <input style={{...s.searchInput,width:160}} placeholder="Filter..." value={adoWISearch} onChange={e=>setAdoWISearch(e.target.value)}/>
@@ -892,7 +933,7 @@ export default function App() {
 
             {/* PRs */}
             {adoSubTab==="prs"&&<>
-              {adoPRError&&<div style={s.errMsg}>⚠️ {adoPRError}</div>}
+              {adoPRError&&<div style={s.errMsg}>⚠️ {adoPRError==="CORS_BLOCK"?"Azure DevOps blocked the request — check your org/project settings.":adoPRError}</div>}
               <div style={s.adoFilterRow}>
                 {["active","completed","abandoned"].map(f=><button key={f} style={s.adoFilterBtn(adoPRStatus===f)} onClick={()=>setAdoPRStatus(f)}>{f.charAt(0).toUpperCase()+f.slice(1)}</button>)}
                 {adoRepos.length>0&&<select style={{...s.fSelect,width:150,padding:"5px 10px"}} value={adoSelectedRepo} onChange={e=>setAdoSelectedRepo(e.target.value)}>{adoRepos.map(r=><option key={r.id} value={r.name}>{r.name}</option>)}</select>}
@@ -926,7 +967,7 @@ export default function App() {
 
             {/* Sprints */}
             {adoSubTab==="sprints"&&<>
-              {adoSprintError&&<div style={s.errMsg}>⚠️ {adoSprintError}</div>}
+              {adoSprintError&&<div style={s.errMsg}>⚠️ {adoSprintError==="CORS_BLOCK"?"Azure DevOps blocked the request — check your team name in Settings.":adoSprintError}</div>}
               <div style={s.adoFilterRow}><button style={s.adoRefreshBtn} onClick={loadSprint}>↺ Refresh</button></div>
               {adoSprintLoading&&<div style={{textAlign:"center",padding:"40px"}}><Spinner/></div>}
               {!adoSprintLoading&&!adoConnected&&<div style={s.empty}><div style={{fontSize:38,marginBottom:10}}>🏃</div>Configure your PAT token in Settings to connect.</div>}
