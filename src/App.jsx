@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
-import mammoth from "mammoth";
 
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
@@ -39,10 +38,19 @@ function getFileIcon(category) {
   return {image:"🖼️", pdf:"📄", docx:"📝", text:"📋"}[category] || "📎";
 }
 
-// Extract text from a .docx using mammoth
+// Extract text from a .docx by loading mammoth from CDN
 async function extractDocxText(file) {
+  if (!window.mammoth) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js";
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
   const arrayBuffer = await file.arrayBuffer();
-  const result = await mammoth.extractRawText({ arrayBuffer });
+  const result = await window.mammoth.extractRawText({ arrayBuffer });
   return result.value || "";
 }
 
