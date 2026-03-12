@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
-const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
+// ─── Removed: ANTHROPIC_API and ANTHROPIC_KEY (now handled server-side via /api/claude-proxy) ───
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const WELCOME = "Hey! I'm your team's knowledge bot 👋 Ask me anything about projects, meeting notes, or tell me something to update in the KB. You can also attach images, PDFs, Word docs, text files, and more!";
@@ -132,7 +131,7 @@ export default function App() {
   const [messages,setMessages]=useState([{role:"assistant",content:WELCOME}]);
   const [sidebarOpen,setSidebarOpen]=useState(true);
   const [input,setInput]=useState("");
-  const [pendingFile,setPendingFile]=useState(null); // {category, name, base64?, text?, mediaType, previewUrl?}
+  const [pendingFile,setPendingFile]=useState(null);
   const [loading,setLoading]=useState(false);
   const [knowledge,setKnowledge]=useState([]);
   const [meetingNotes,setMeetingNotes]=useState([]);
@@ -255,13 +254,23 @@ export default function App() {
     if (f) await attachFile(f);
   }
 
-  // ── Claude API ────────────────────────────────────────────────────────────
-  async function callClaude(system,userContent,maxTokens=400){
-    const res=await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,system,messages:[{role:"user",content:typeof userContent==="string"?userContent:JSON.stringify(userContent)}]})});
-    if(!res.ok){const t=await res.text();throw new Error(`HTTP ${res.status}: ${t}`);}
-    const data=await res.json();
-    return data.content?.map(b=>b.text||"").join("").trim()||"";
+  // ── Claude API — all calls now go through /api/claude-proxy ──────────────
+  async function callClaude(system, userContent, maxTokens=400) {
+    const res = await fetch("/api/claude-proxy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: "user", content: typeof userContent === "string" ? userContent : JSON.stringify(userContent) }],
+      }),
+    });
+    if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t}`); }
+    const data = await res.json();
+    return data.content?.map(b => b.text || "").join("").trim() || "";
   }
+
   async function generateTitle(msg){try{return await callClaude("Generate a short 4-6 word title for a chat that starts with this message. Reply with only the title, no punctuation.",msg,30);}catch(e){return msg.slice(0,40);}}
 
   async function classifyKbIntent(recentMessages,kbSummary){
@@ -315,7 +324,6 @@ export default function App() {
       } else if(pendingFile.category==="pdf"){
         contentBlocks.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:pendingFile.base64}});
       } else if(pendingFile.text){
-        // docx and text — inject as text block with filename context
         contentBlocks.push({type:"text",text:`[File: ${pendingFile.name}]\n\n${pendingFile.text}`});
       }
     }
@@ -338,7 +346,6 @@ export default function App() {
 
       // If a file is attached, skip KB classifier and go straight to chat
       if(pendingFile===null && displayMsg.fileAttached===null){
-        // KB update path — only when no file attached
         const kbSummary=knowledgeRef.current.map(e=>`[${e.id}] [${e.category||"General"}] Q: ${e.question} | A: ${e.answer.slice(0,80)}`).join("\n");
         const isKb=await classifyKbIntent(updatedDisplay,kbSummary);log("KB intent: "+isKb);
         if(isKb){
@@ -352,12 +359,21 @@ export default function App() {
         }
       }
 
-      // Normal chat (includes file analysis)
+      // Normal chat (includes file analysis) — via proxy
       const convText=updatedDisplay.map(m=>typeof m.content==="string"?m.content:"").join(" ");
       const notesContext=buildNotesContext(getRelevantNotes(convText,meetingNotesRef.current));
       const chatHistory=updatedDisplay.slice(-8).map(m=>({role:m.role,content:typeof m.content==="string"?m.content:"[file attached]"}));
       chatHistory[chatHistory.length-1]={role:"user",content:contentBlocks};
-      const res=await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1500,system:`You are a helpful team knowledge assistant. Answer using the KB and meeting notes below. Be concise and friendly. When a file is provided, analyze it and answer the user's question about it. Never mention JSON or internal mechanics.\n\nKNOWLEDGE BASE:\n${buildKbContext(knowledgeRef.current)}${notesContext?`\n\nRECENT MEETING NOTES:\n${notesContext}`:""}`,messages:chatHistory})});
+      const res = await fetch("/api/claude-proxy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1500,
+          system: `You are a helpful team knowledge assistant. Answer using the KB and meeting notes below. Be concise and friendly. When a file is provided, analyze it and answer the user's question about it. Never mention JSON or internal mechanics.\n\nKNOWLEDGE BASE:\n${buildKbContext(knowledgeRef.current)}${notesContext?`\n\nRECENT MEETING NOTES:\n${notesContext}`:""}`,
+          messages: chatHistory,
+        }),
+      });
       const data=await res.json();const reply=data.content?.map(b=>b.text||"").join("")||"Sorry, no response.";
       const newMsgs=[...updatedDisplay,{role:"assistant",content:reply}];setMessages(newMsgs);await saveThread(threadId,newMsgs,title);
     }catch(e){log("Error: "+e.message);setMessages(prev=>[...prev,{role:"assistant",content:`⚠️ Error: ${e.message}`}]);}
